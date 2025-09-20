@@ -117,11 +117,11 @@ python hako2epub.py -u light_novel_url
 ```
 ### Notes
 * After processing 190 requests at a time, the program will pause for 120 seconds (2 mins) to avoid spam blocking. Please be patient if it hangs.
-* Light novel will be downloaded into the same folder as the program.
-* Downloaded information will be saved into `ln_info.json` file located in the same folder as the program.
+* Light novel will be downloaded into the 'downloaded' directory.
+* Downloaded information will be saved into `ln_info.json` file located in the 'downloaded' directory.
 * If you download specific chapters of a light novel, please enter the full name of the chapter in the "from ... to ..." prompt.
 * If you update the volume which contains specific chapters, only new chapters after the current latest chapter will be added.
-* Try to keep the program and `ln_info.json` file at the same folder with your downloaded light novels for efficiently management.
+* The program automatically manages the `ln_info.json` file alongside your downloaded light novels in the 'downloaded' directory for efficient management.
 
 ## Screenshots
 ![Demo](images/demo.png)
@@ -132,7 +132,7 @@ python hako2epub.py -u light_novel_url
 * I only tested on some of my favorite light novels.
 * Sometimes the tool can not get images from some image hosts.
 * Sometimes you have to wait (most cases are under 10 seconds) to download or update the light novels (maybe only the first light novel in the list). If you are over that time, you should use a VPN (1.1.1.1 Cloudflare WARP) to avoid this.
-* If you update the light novel that was renamed, it will download the whole light novel again. To avoid this, please manually rename the path of the epub file to the new light novel name exactly like the current name format. Also rename the light novel in the `ln_info.json` file.
+* If you update the light novel that was renamed, it will download the whole light novel again. To avoid this, please manually rename the path of the epub file to the new light novel name exactly like the current name format. Also rename the light novel in the `downloaded/ln_info.json` file.
 
 <!-- CONTRIBUTING -->
 ## Contributing

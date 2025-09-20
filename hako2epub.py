@@ -317,8 +317,15 @@ class OutputFormatter:
 class UpdateManager:
     """Handles updating of existing light novels."""
 
-    def __init__(self, json_file: str = 'ln_info.json'):
+    def __init__(self, json_file: str = 'downloaded/ln_info.json'):
         self.json_file = json_file
+        self._ensure_downloaded_dir()
+
+    def _ensure_downloaded_dir(self) -> None:
+        """Ensure the downloaded directory exists."""
+        downloaded_dir = 'downloaded'
+        if not isdir(downloaded_dir):
+            mkdir(downloaded_dir)
 
     def check_updates(self, ln_url: str = 'all') -> None:
         """
@@ -756,7 +763,7 @@ class UpdateManager:
 class EpubEngine:
     """Class for creating and managing EPUB files."""
 
-    def __init__(self, json_file: str = 'ln_info.json'):
+    def __init__(self, json_file: str = 'downloaded/ln_info.json'):
         self.json_file = json_file
         self.book = None
         self.light_novel = None
@@ -1057,11 +1064,17 @@ class EpubEngine:
             f'{self.volume.name}-{self.light_novel.name}') + '.epub'
         self.set_metadata(filename, self.light_novel.author)
 
-        folder_name = TextUtils.format_filename(self.light_novel.name)
-        if not isdir(folder_name):
-            mkdir(folder_name)
+        # Create downloaded directory if it doesn't exist
+        downloaded_dir = 'downloaded'
+        if not isdir(downloaded_dir):
+            mkdir(downloaded_dir)
 
-        filepath = join(folder_name, filename)
+        folder_name = TextUtils.format_filename(self.light_novel.name)
+        full_folder_path = join(downloaded_dir, folder_name)
+        if not isdir(full_folder_path):
+            mkdir(full_folder_path)
+
+        filepath = join(full_folder_path, filename)
 
         try:
             epub.write_epub(filepath, self.book, {})
@@ -1099,7 +1112,8 @@ class EpubEngine:
         filename = TextUtils.format_filename(
             f'{volume.name}-{ln.name}') + '.epub'
         folder_name = TextUtils.format_filename(ln.name)
-        filepath = join(folder_name, filename)
+        full_folder_path = join('downloaded', folder_name)
+        filepath = join(full_folder_path, filename)
 
         if isfile(filepath):
             try:
@@ -1153,7 +1167,14 @@ class LightNovelManager:
     """Manages light novel operations."""
 
     def __init__(self):
-        self.json_file = 'ln_info.json'
+        self.json_file = 'downloaded/ln_info.json'
+        self._ensure_downloaded_dir()
+
+    def _ensure_downloaded_dir(self) -> None:
+        """Ensure the downloaded directory exists."""
+        downloaded_dir = 'downloaded'
+        if not isdir(downloaded_dir):
+            mkdir(downloaded_dir)
 
     def _check_domains(self) -> None:
         """Check which domains are accessible."""
@@ -1249,7 +1270,8 @@ class LightNovelManager:
                     continue
 
                 folder_name = TextUtils.format_filename(ln_name)
-                if not isdir(folder_name):
+                full_folder_path = join('downloaded', folder_name)
+                if not isdir(full_folder_path):
                     # Remove entry if folder doesn't exist
                     updated_data['ln_list'] = [entry for entry in updated_data['ln_list']
                                                if entry.get('ln_name') != ln_name]
@@ -1263,7 +1285,7 @@ class LightNovelManager:
 
                         epub_name = TextUtils.format_filename(
                             f'{volume_name}-{ln_name}') + '.epub'
-                        epub_path = join(folder_name, epub_name)
+                        epub_path = join(full_folder_path, epub_name)
                         if not isfile(epub_path):
                             # Remove volume if EPUB doesn't exist
                             updated_volumes = [vol for vol in updated_volumes
