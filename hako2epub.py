@@ -1017,6 +1017,12 @@ class EpubEngine:
         for element in content_div.find_all("p", {"target": "__blank"}):
             element.decompose()
 
+        # Remove the promotional image
+        for img_tag in content_div.find_all("img", class_="d-none d-md-block"):
+            img_tag.decompose()
+        for img_tag in content_div.find_all("img", class_="d-md-none"):
+            img_tag.decompose()
+
         img_tags = content_div.find_all("img")
         content = str(content_div)
 
