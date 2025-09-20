@@ -764,32 +764,27 @@ class ContentExporter:
     """Class for exporting downloaded content to JSON and markdown formats."""
 
     @staticmethod
-    def export_volume_json(light_novel: 'LightNovel', volume: 'Volume', content_data: Dict[str, str]) -> None:
+    def export_volume_json(volume: 'Volume', content_data: Dict[str, str], image_data: Dict[str, str], light_novel_name: str) -> None:
         """
         Export volume content to JSON format.
 
         Args:
-            light_novel: The light novel data
             volume: The volume data
             content_data: Dictionary mapping chapter names to their content
+            image_data: Dictionary mapping image URLs to local file paths
+            light_novel_name: Name of the light novel for file naming
         """
         try:
-            folder_name = TextUtils.format_filename(light_novel.name)
+            folder_name = TextUtils.format_filename(light_novel_name)
             full_folder_path = join('downloaded', folder_name)
 
             if not isdir(full_folder_path):
                 mkdir(full_folder_path)
 
-            filename = TextUtils.format_filename(f'{volume.name}-{light_novel.name}') + '.json'
+            filename = TextUtils.format_filename(f'{volume.name}-{light_novel_name}') + '.json'
             filepath = join(full_folder_path, filename)
 
             export_data = {
-                'novel_info': {
-                    'name': light_novel.name,
-                    'author': light_novel.author,
-                    'url': light_novel.url,
-                    'summary': light_novel.summary
-                },
                 'volume_info': {
                     'name': volume.name,
                     'url': volume.url,
@@ -797,6 +792,7 @@ class ContentExporter:
                     'num_chapters': volume.num_chapters
                 },
                 'chapters': content_data,
+                'images': image_data,
                 'export_timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
             }
 
@@ -810,45 +806,43 @@ class ContentExporter:
             OutputFormatter.print_error(f'Exporting JSON: {filename}')
 
     @staticmethod
-    def export_volume_markdown(light_novel: 'LightNovel', volume: 'Volume', content_data: Dict[str, str]) -> None:
+    def export_volume_markdown(volume: 'Volume', content_data: Dict[str, str], image_data: Dict[str, str], light_novel_name: str) -> None:
         """
         Export volume content to markdown format.
 
         Args:
-            light_novel: The light novel data
             volume: The volume data
             content_data: Dictionary mapping chapter names to their content
+            image_data: Dictionary mapping image URLs to local file paths
+            light_novel_name: Name of the light novel for file naming
         """
         try:
-            folder_name = TextUtils.format_filename(light_novel.name)
+            folder_name = TextUtils.format_filename(light_novel_name)
             full_folder_path = join('downloaded', folder_name)
 
             if not isdir(full_folder_path):
                 mkdir(full_folder_path)
 
-            filename = TextUtils.format_filename(f'{volume.name}-{light_novel.name}') + '.md'
+            filename = TextUtils.format_filename(f'{volume.name}-{light_novel_name}') + '.md'
             filepath = join(full_folder_path, filename)
 
-            markdown_content = f"""# {light_novel.name}
-## {volume.name}
+            markdown_content = f"""# {volume.name}
 
-**Author:** {light_novel.author}
-**Novel URL:** {light_novel.url}
 **Volume URL:** {volume.url}
 **Chapters:** {volume.num_chapters}
+**Cover Image:** {volume.cover_img}
 **Exported:** {time.strftime('%Y-%m-%d %H:%M:%S')}
 
 ---
 
-## Summary
-
-{light_novel.summary}
-
----
-
-## Chapters
+## Images
 
 """
+
+            for img_url, img_path in image_data.items():
+                markdown_content += f"- **{img_url}** → `{img_path}`\n"
+
+            markdown_content += "\n---\n\n## Chapters\n\n"
 
             for chapter_name, chapter_content in content_data.items():
                 markdown_content += f"\n### {chapter_name}\n\n"
@@ -863,6 +857,152 @@ class ContentExporter:
             logger.error(f'Error exporting volume markdown: {e}')
             OutputFormatter.print_error(f'Exporting Markdown: {filename}')
 
+    @staticmethod
+    def export_book_metadata(light_novel: 'LightNovel') -> None:
+        """
+        Export book-level metadata from light novel data.
+
+        Args:
+            light_novel: The light novel data
+        """
+        try:
+            folder_name = TextUtils.format_filename(light_novel.name)
+            full_folder_path = join('downloaded', folder_name)
+
+            if not isdir(full_folder_path):
+                mkdir(full_folder_path)
+
+            # Export book metadata JSON
+            json_filename = TextUtils.format_filename(f'{light_novel.name}-metadata') + '.json'
+            json_filepath = join(full_folder_path, json_filename)
+
+            book_metadata = {
+                'book_info': {
+                    'name': light_novel.name,
+                    'author': light_novel.author,
+                    'url': light_novel.url,
+                    'summary': light_novel.summary,
+                    'num_volumes': light_novel.num_volumes,
+                    'series_info': light_novel.series_info,
+                    'fact_item': light_novel.fact_item
+                },
+                'volumes': [
+                    {
+                        'name': vol.name,
+                        'url': vol.url,
+                        'cover_img': vol.cover_img,
+                        'num_chapters': vol.num_chapters
+                    } for vol in light_novel.volumes
+                ],
+                'export_timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
+            }
+
+            with open(json_filepath, 'w', encoding='utf-8') as f:
+                json.dump(book_metadata, f, ensure_ascii=False, indent=2)
+
+            # Export book metadata Markdown
+            md_filename = TextUtils.format_filename(f'{light_novel.name}-metadata') + '.md'
+            md_filepath = join(full_folder_path, md_filename)
+
+            markdown_content = f"""# {light_novel.name}
+
+**Author:** {light_novel.author}
+**URL:** {light_novel.url}
+**Volumes:** {light_novel.num_volumes}
+**Exported:** {time.strftime('%Y-%m-%d %H:%M:%S')}
+
+## Summary
+
+{light_novel.summary}
+
+## Series Information
+
+{light_novel.series_info}
+
+## Additional Information
+
+{light_novel.fact_item}
+
+## Volumes
+
+"""
+
+            for vol in light_novel.volumes:
+                markdown_content += f"### {vol.name}\n"
+                markdown_content += f"- **URL:** {vol.url}\n"
+                markdown_content += f"- **Cover:** {vol.cover_img}\n"
+                markdown_content += f"- **Chapters:** {vol.num_chapters}\n\n"
+
+            with open(md_filepath, 'w', encoding='utf-8') as f:
+                f.write(markdown_content)
+
+            OutputFormatter.print_success(f'Exported book metadata: {json_filename}, {md_filename}')
+
+        except Exception as e:
+            logger.error(f'Error exporting book metadata: {e}')
+            OutputFormatter.print_error('Exporting book metadata')
+
+    @staticmethod
+    def download_volume_images(image_data: Dict[str, str], light_novel_name: str, volume_name: str) -> Dict[str, str]:
+        """
+        Download images to the volume directory.
+
+        Args:
+            image_data: Dictionary mapping image URLs to EPUB paths
+            light_novel_name: Name of the light novel
+            volume_name: Name of the volume
+
+        Returns:
+            Dictionary mapping image URLs to local file paths
+        """
+        downloaded_images = {}
+
+        try:
+            folder_name = TextUtils.format_filename(light_novel_name)
+            volume_folder_name = TextUtils.format_filename(f'{volume_name}-{light_novel_name}')
+            base_path = join('downloaded', folder_name)
+            volume_images_path = join(base_path, 'images', volume_folder_name)
+
+            if not isdir(volume_images_path):
+                # Create nested directories
+                if not isdir(base_path):
+                    mkdir(base_path)
+                images_base = join(base_path, 'images')
+                if not isdir(images_base):
+                    mkdir(images_base)
+                if not isdir(volume_images_path):
+                    mkdir(volume_images_path)
+
+            for img_url, epub_path in image_data.items():
+                try:
+                    # Extract filename from EPUB path
+                    epub_filename = epub_path.split('/')[-1]
+                    local_filename = epub_filename
+                    local_filepath = join(volume_images_path, local_filename)
+
+                    # Download the image
+                    image = ImageManager.get_image(img_url)
+                    if image:
+                        image.save(local_filepath, 'JPEG')
+                        # Store relative path from volume directory
+                        relative_path = join('images', volume_folder_name, local_filename)
+                        downloaded_images[img_url] = relative_path
+
+                except Exception as e:
+                    logger.error(f'Error downloading image {img_url}: {e}')
+                    # Keep the original URL if download fails
+                    downloaded_images[img_url] = img_url
+
+            if downloaded_images:
+                OutputFormatter.print_success(f'Downloaded {len(downloaded_images)} images for {volume_name}')
+
+        except Exception as e:
+            logger.error(f'Error creating image directory: {e}')
+            # Return original image_data if directory creation fails
+            return {url: url for url in image_data.keys()}
+
+        return downloaded_images
+
 
 class EpubEngine:
     """Class for creating and managing EPUB files."""
@@ -873,6 +1013,7 @@ class EpubEngine:
         self.light_novel = None
         self.volume = None
         self.chapter_content_data = {}  # Store raw chapter content for export
+        self.image_data = {}  # Store image URL to file path mappings
 
     def make_cover_image(self) -> Optional[epub.EpubItem]:
         """
@@ -1096,6 +1237,9 @@ class EpubEngine:
 
                         self.book.add_item(image_item)
 
+                        # Track image for export
+                        self.image_data[img_url] = img_path
+
                         old_path = f'src="{img_url}'
                         new_path = f'style="display: block;margin-left: auto;margin-right: auto;" src="{img_path}'
                         content = content.replace(old_path, new_path)
@@ -1196,8 +1340,13 @@ class EpubEngine:
 
         # Export content to JSON and markdown formats
         if self.chapter_content_data:
-            ContentExporter.export_volume_json(self.light_novel, self.volume, self.chapter_content_data)
-            ContentExporter.export_volume_markdown(self.light_novel, self.volume, self.chapter_content_data)
+            # Download images to volume directory
+            downloaded_image_paths = ContentExporter.download_volume_images(
+                self.image_data, self.light_novel.name, self.volume.name)
+
+            # Export with downloaded image paths
+            ContentExporter.export_volume_json(self.volume, self.chapter_content_data, downloaded_image_paths, self.light_novel.name)
+            ContentExporter.export_volume_markdown(self.volume, self.chapter_content_data, downloaded_image_paths, self.light_novel.name)
 
     def create_epub(self, ln: LightNovel) -> None:
         """
@@ -1213,9 +1362,14 @@ class EpubEngine:
             self.book = epub.EpubBook()
             self.volume = volume
             self.chapter_content_data = {}  # Reset content data for each volume
+            self.image_data = {}  # Reset image data for each volume
             self.bind_epub_book()
             OutputFormatter.print_success('Processing', volume.name)
             print('-' * LINE_SIZE)
+
+        # Export book-level metadata
+        ContentExporter.export_book_metadata(ln)
+
         self._save_json(ln)
 
     def update_epub(self, ln: LightNovel, volume: Volume) -> None:
@@ -1247,6 +1401,7 @@ class EpubEngine:
             self.light_novel = ln
             self.volume = volume
             self.chapter_content_data = {}  # Reset content data for update
+            self.image_data = {}  # Reset image data for update
             self.make_chapters(len(existing_chapters))
 
             # Remove old TOC
@@ -1266,8 +1421,13 @@ class EpubEngine:
 
             # Export content to JSON and markdown formats
             if self.chapter_content_data:
-                ContentExporter.export_volume_json(self.light_novel, self.volume, self.chapter_content_data)
-                ContentExporter.export_volume_markdown(self.light_novel, self.volume, self.chapter_content_data)
+                # Download images to volume directory
+                downloaded_image_paths = ContentExporter.download_volume_images(
+                    self.image_data, self.light_novel.name, self.volume.name)
+
+                # Export with downloaded image paths
+                ContentExporter.export_volume_json(self.volume, self.chapter_content_data, downloaded_image_paths, self.light_novel.name)
+                ContentExporter.export_volume_markdown(self.volume, self.chapter_content_data, downloaded_image_paths, self.light_novel.name)
 
             self._save_json(ln)
         else:
