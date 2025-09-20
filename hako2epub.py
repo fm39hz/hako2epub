@@ -21,7 +21,7 @@ from multiprocessing.dummy import Pool as ThreadPool
 from os import mkdir
 from os.path import isdir, isfile, join
 from typing import Dict, List, Optional, Tuple, Any
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 
 import questionary
 import requests
@@ -760,6 +760,110 @@ class UpdateManager:
             print('-' * LINE_SIZE)
 
 
+class ContentExporter:
+    """Class for exporting downloaded content to JSON and markdown formats."""
+
+    @staticmethod
+    def export_volume_json(light_novel: 'LightNovel', volume: 'Volume', content_data: Dict[str, str]) -> None:
+        """
+        Export volume content to JSON format.
+
+        Args:
+            light_novel: The light novel data
+            volume: The volume data
+            content_data: Dictionary mapping chapter names to their content
+        """
+        try:
+            folder_name = TextUtils.format_filename(light_novel.name)
+            full_folder_path = join('downloaded', folder_name)
+
+            if not isdir(full_folder_path):
+                mkdir(full_folder_path)
+
+            filename = TextUtils.format_filename(f'{volume.name}-{light_novel.name}') + '.json'
+            filepath = join(full_folder_path, filename)
+
+            export_data = {
+                'novel_info': {
+                    'name': light_novel.name,
+                    'author': light_novel.author,
+                    'url': light_novel.url,
+                    'summary': light_novel.summary
+                },
+                'volume_info': {
+                    'name': volume.name,
+                    'url': volume.url,
+                    'cover_img': volume.cover_img,
+                    'num_chapters': volume.num_chapters
+                },
+                'chapters': content_data,
+                'export_timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
+            }
+
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(export_data, f, ensure_ascii=False, indent=2)
+
+            OutputFormatter.print_success(f'Exported JSON: {filename}')
+
+        except Exception as e:
+            logger.error(f'Error exporting volume JSON: {e}')
+            OutputFormatter.print_error(f'Exporting JSON: {filename}')
+
+    @staticmethod
+    def export_volume_markdown(light_novel: 'LightNovel', volume: 'Volume', content_data: Dict[str, str]) -> None:
+        """
+        Export volume content to markdown format.
+
+        Args:
+            light_novel: The light novel data
+            volume: The volume data
+            content_data: Dictionary mapping chapter names to their content
+        """
+        try:
+            folder_name = TextUtils.format_filename(light_novel.name)
+            full_folder_path = join('downloaded', folder_name)
+
+            if not isdir(full_folder_path):
+                mkdir(full_folder_path)
+
+            filename = TextUtils.format_filename(f'{volume.name}-{light_novel.name}') + '.md'
+            filepath = join(full_folder_path, filename)
+
+            markdown_content = f"""# {light_novel.name}
+## {volume.name}
+
+**Author:** {light_novel.author}
+**Novel URL:** {light_novel.url}
+**Volume URL:** {volume.url}
+**Chapters:** {volume.num_chapters}
+**Exported:** {time.strftime('%Y-%m-%d %H:%M:%S')}
+
+---
+
+## Summary
+
+{light_novel.summary}
+
+---
+
+## Chapters
+
+"""
+
+            for chapter_name, chapter_content in content_data.items():
+                markdown_content += f"\n### {chapter_name}\n\n"
+                markdown_content += f"{chapter_content}\n\n---\n"
+
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(markdown_content)
+
+            OutputFormatter.print_success(f'Exported Markdown: {filename}')
+
+        except Exception as e:
+            logger.error(f'Error exporting volume markdown: {e}')
+            OutputFormatter.print_error(f'Exporting Markdown: {filename}')
+
+
 class EpubEngine:
     """Class for creating and managing EPUB files."""
 
@@ -768,6 +872,7 @@ class EpubEngine:
         self.book = None
         self.light_novel = None
         self.volume = None
+        self.chapter_content_data = {}  # Store raw chapter content for export
 
     def make_cover_image(self) -> Optional[epub.EpubItem]:
         """
@@ -913,12 +1018,18 @@ class EpubEngine:
 
             # Get chapter content
             content_div = soup.find('div', id='chapter-content')
+            raw_text_content = ""
             if content_div:
+                # Store raw text content for export (without images)
+                raw_text_content = content_div.get_text(separator='\n', strip=True)
                 content += self._process_images(content_div, index + 1)
 
             # Get notes
             notes = self._get_chapter_notes(soup)
             content = self._replace_notes(content, notes)
+
+            # Store raw content for export
+            self.chapter_content_data[chapter_title] = raw_text_content
 
             epub_content = epub.EpubHtml(
                 uid=str(index + 1),
@@ -1083,6 +1194,11 @@ class EpubEngine:
             print('Error: Cannot write epub file!')
             print('-' * LINE_SIZE)
 
+        # Export content to JSON and markdown formats
+        if self.chapter_content_data:
+            ContentExporter.export_volume_json(self.light_novel, self.volume, self.chapter_content_data)
+            ContentExporter.export_volume_markdown(self.light_novel, self.volume, self.chapter_content_data)
+
     def create_epub(self, ln: LightNovel) -> None:
         """
         Create EPUB files for all volumes.
@@ -1096,6 +1212,7 @@ class EpubEngine:
                 'Processing volume: ', volume.name, info_style='bold fg:cyan')
             self.book = epub.EpubBook()
             self.volume = volume
+            self.chapter_content_data = {}  # Reset content data for each volume
             self.bind_epub_book()
             OutputFormatter.print_success('Processing', volume.name)
             print('-' * LINE_SIZE)
@@ -1129,6 +1246,7 @@ class EpubEngine:
 
             self.light_novel = ln
             self.volume = volume
+            self.chapter_content_data = {}  # Reset content data for update
             self.make_chapters(len(existing_chapters))
 
             # Remove old TOC
@@ -1145,6 +1263,11 @@ class EpubEngine:
                 logger.error(f'Error writing epub file: {e}')
                 print('Error: Cannot write epub file!')
                 print('-' * LINE_SIZE)
+
+            # Export content to JSON and markdown formats
+            if self.chapter_content_data:
+                ContentExporter.export_volume_json(self.light_novel, self.volume, self.chapter_content_data)
+                ContentExporter.export_volume_markdown(self.light_novel, self.volume, self.chapter_content_data)
 
             self._save_json(ln)
         else:
