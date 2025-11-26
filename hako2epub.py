@@ -772,8 +772,9 @@ class LightNovelInfoParser:
 
 
 class Application:
-    def __init__(self):
+    def __init__(self, url=None):
         self.parser = LightNovelInfoParser()
+        self.cli_url = url
 
     def run(self):
         action = questionary.select(
@@ -790,7 +791,10 @@ class Application:
         save_dir = ""
 
         if action != "Build EPUB (From JSONs)":
-            url = questionary.text("Light Novel URL:").ask()
+            if self.cli_url:
+                url = self.cli_url
+            else:
+                url = questionary.text("Light Novel URL:").ask()
             ln = self.parser.parse(url)
             if not ln:
                 return
@@ -852,7 +856,12 @@ class Application:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Hako2Epub Downloader")
+    parser.add_argument("url", nargs="?", help="The URL of the light novel to download")
+    args = parser.parse_args()
+
     try:
-        Application().run()
+        app = Application(args.url)
+        app.run()
     except KeyboardInterrupt:
         print("\nExit.")
