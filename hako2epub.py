@@ -1,6 +1,5 @@
 """
 hako2epub - A tool to download light novels from ln.hako.vn / docln.net
-Version: 3.10.0 (Smart Footnote merging: (1)[note] -> Link(1))
 """
 
 import argparse
@@ -235,7 +234,6 @@ class NovelDownloader:
             "summary": self.ln.summary,
             "cover_image_local": local_cover_path,
             "url": self.ln.url,
-            "tool_version": "3.10.0",
             "volumes": volume_list,
         }
 
@@ -288,7 +286,7 @@ class NovelDownloader:
                 if not el.get_text(strip=True) and not el.find("img"):
                     el.decompose()
 
-            # *** NEW: Smart Footnote Processing ***
+            # *** Smart Footnote Processing ***
             # 1. Extract definitions
             note_map = {}
             # Regex to find note divs like id="note12345"
