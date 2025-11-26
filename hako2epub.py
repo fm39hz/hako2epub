@@ -1,6 +1,6 @@
 """
 hako2epub - A tool to download light novels from ln.hako.vn / docln.net
-Supports downloading individual volumes or merging them into a single EPUB.
+Version: 3.4.0 (Metadata Volume Ordering & Auto-Sort Build)
 """
 
 import argparse
@@ -8,19 +8,19 @@ import json
 import re
 import time
 import logging
-from io import BytesIO
+import os
+import shutil
 from multiprocessing.dummy import Pool as ThreadPool
-from os import mkdir
-from os.path import isdir, isfile, join
-from typing import Dict, List, Optional, Tuple, Any, Union
+from os.path import isdir, isfile, join, exists
+from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
+from urllib.parse import urlparse
 
 import questionary
 import requests
 import tqdm
 from bs4 import BeautifulSoup
 from ebooklib import epub
-from PIL import Image
 
 # Configure logging
 logging.basicConfig(
@@ -29,130 +29,53 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Constants
-DOMAINS = ["ln.hako.vn", "docln.net", "docln.sbs"]
-SLEEP_TIME = 30
-LINE_SIZE = 80
-THREAD_NUM = 8
+DOMAINS = ["docln.net", "ln.hako.vn", "docln.sbs"]
+IMAGE_DOMAINS = ["i.hako.vip", "i.docln.net", "ln.hako.vn"]
+
+THREAD_NUM = 4
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.97 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Referer": "https://docln.net/",
 }
-TOOL_VERSION = "2.2.0"
 HTML_PARSER = "html.parser"
 
-# Session for requests
 session = requests.Session()
+
+# --- Data Structures ---
 
 
 @dataclass
 class Chapter:
-    """Represents a chapter in a light novel."""
-
     name: str
     url: str
 
 
 @dataclass
 class Volume:
-    """Represents a volume in a light novel."""
-
     url: str = ""
     name: str = ""
     cover_img: str = ""
-    num_chapters: int = 0
-    # CHANGED: Use List instead of Dict to prevent overwriting duplicate chapter names (Logic from Colab)
     chapters: List[Chapter] = field(default_factory=list)
 
 
 @dataclass
 class LightNovel:
-    """Represents a light novel with all its information."""
-
     name: str = ""
     url: str = ""
     author: str = "Unknown"
     summary: str = ""
-    series_info: str = ""
-    main_cover: str = ""  # Added from Colab logic
+    main_cover: str = ""
     volumes: List[Volume] = field(default_factory=list)
 
 
-class ColorCodes:
-    """ANSI color codes for terminal output."""
-
-    OKCYAN = "\033[96m"
-    OKGREEN = "\033[92m"
-    FAIL = "\03[91m"
-    ENDC = "\033[0m"
-
-
-class NetworkManager:
-    """Handles network requests with retry logic (Local Script Logic)."""
-
-    @staticmethod
-    def check_available_request(url: str, stream: bool = False) -> requests.Response:
-        if not url.startswith("http"):
-            url = "https://" + url if not url.startswith("//") else "https:" + url
-
-        # Simple domain rotation logic
-        original_url = url
-        domains_to_try = DOMAINS[:]
-
-        # Determine path
-        path = url
-        for domain in DOMAINS:
-            if domain in url:
-                # simple split to find path
-                parts = url.split(domain)
-                if len(parts) > 1:
-                    path = parts[1]
-                break
-
-        last_exception = None
-
-        for domain in domains_to_try:
-            # Reconstruct URL with current domain trial
-            if any(d in original_url for d in DOMAINS):
-                # Replace existing domain
-                url = f"https://{domain}{path}"
-
-            headers = HEADERS.copy()
-            headers["Referer"] = f"https://{domain}"
-
-            for retry in range(3):
-                try:
-                    response = session.get(
-                        url, stream=stream, headers=headers, timeout=30
-                    )
-                    if response.status_code == 200:
-                        return response
-                    elif response.status_code == 404:
-                        break  # Don't retry 404
-                    else:
-                        time.sleep(2)
-                except requests.RequestException as e:
-                    last_exception = e
-                    time.sleep(2)
-
-            # If 404 or success, break loop, else try next domain
-            if "response" in locals() and response.status_code == 200:
-                return response
-
-        if last_exception:
-            raise last_exception
-        raise requests.RequestException(f"Failed to access {original_url}")
+# --- Utilities ---
 
 
 class TextUtils:
     @staticmethod
-    def format_text(text: str) -> str:
-        return text.strip().replace("\n", "")
-
-    @staticmethod
     def format_filename(name: str) -> str:
-        # Strict sanitization
         name = re.sub(r'[\\/*?:"<>|]', "", name)
-        name = name.replace(" ", "_")
+        name = name.replace(" ", "_").strip()
         return name[:100]
 
     @staticmethod
@@ -164,527 +87,619 @@ class TextUtils:
             if d in base_url:
                 domain = d
                 break
-
-        if url.startswith("/"):
-            return f"https://{domain}{url}"
-        return f"https://{domain}/{url}"
-
-
-class ImageManager:
-    @staticmethod
-    def get_image(image_url: str) -> Optional[Image.Image]:
-        if not image_url:
-            return None
-        if "imgur.com" in image_url and "." not in image_url[-5:]:
-            image_url += ".jpg"
-
-        try:
-            response = NetworkManager.check_available_request(image_url, stream=True)
-            image = Image.open(response.raw).convert("RGB")
-            return image
-        except Exception as e:
-            logger.error(f"Cannot get image: {image_url}")
-            return None
-
-
-class OutputFormatter:
-    @staticmethod
-    def print_formatted(name: str, info: str, info_style="bold fg:cyan"):
-        questionary.print("! ", style="bold fg:gray", end="")
-        questionary.print(name, style="bold fg:white", end="")
-        questionary.print(info, style=info_style)
-
-    @staticmethod
-    def print_success(message: str, item_name: str = ""):
-        print(
-            f"{message} {ColorCodes.OKCYAN}{item_name}{ColorCodes.ENDC}: [{ColorCodes.OKGREEN} DONE {ColorCodes.ENDC}]"
+        return (
+            f"https://{domain}{url}"
+            if url.startswith("/")
+            else f"https://{domain}/{url}"
         )
 
 
-class EpubEngine:
-    def __init__(self):
-        self.book = None
-        self.light_novel = None
-        self.volume = None
-        # CSS from Colab
-        self.css_style = """
-            body { margin: 0; padding: 5px; text-align: justify; line-height: 1.4em; }
-            h1, h2, h3 { text-align: center; margin: 1em 0; font-weight: bold; }
-            p { margin-top: 0; margin-bottom: 0.5em; text-indent: 0; }
-            img { display: block; margin: 10px auto; max-width: 100%; height: auto; page-break-inside: avoid; }
-            .center { text-align: center; }
-            .summary { margin: 20px; font-style: italic; background-color: #f9f9f9; padding: 10px; border-radius: 5px; }
-        """
+class NetworkManager:
+    @staticmethod
+    def check_available_request(url: str, stream: bool = False) -> requests.Response:
+        if not url.startswith("http"):
+            url = "https://" + url if not url.startswith("//") else "https:" + url
 
-    def make_cover_image(self, url: str) -> Optional[epub.EpubItem]:
+        parsed = urlparse(url)
+        path = parsed.path
+        if parsed.query:
+            path += "?" + parsed.query
+
+        is_image = (
+            "/covers/" in path
+            or path.endswith((".jpg", ".png", ".gif", ".jpeg"))
+            or "/img/" in path
+        )
+        domains_to_try = IMAGE_DOMAINS[:] if is_image else DOMAINS[:]
+
+        original_domain = parsed.netloc
+        if original_domain in domains_to_try:
+            domains_to_try.remove(original_domain)
+            domains_to_try.insert(0, original_domain)
+
+        last_exception = None
+
+        for domain in domains_to_try:
+            target_url = f"https://{domain}{path}"
+            headers = HEADERS.copy()
+            headers["Referer"] = f"https://{DOMAINS[0]}/"
+
+            for i in range(3):
+                try:
+                    response = session.get(
+                        target_url, stream=stream, headers=headers, timeout=30
+                    )
+                    if response.status_code == 200:
+                        return response
+                    elif response.status_code in [404, 403]:
+                        break
+                    time.sleep(2 + i)
+                except requests.RequestException as e:
+                    last_exception = e
+                    time.sleep(2 + i)
+
+            if "response" in locals() and response.status_code == 200:
+                return response
+
+        if last_exception:
+            raise last_exception
+        raise requests.RequestException(f"Failed to access {url}")
+
+    @staticmethod
+    def download_image_to_disk(url: str, save_path: str) -> bool:
         if not url:
-            return None
+            return False
+        if exists(save_path):
+            return True
+        if "imgur.com" in url and "." not in url[-5:]:
+            url += ".jpg"
         try:
-            image = ImageManager.get_image(url)
-            if not image:
-                return None
+            resp = NetworkManager.check_available_request(url, stream=True)
+            with open(save_path, "wb") as f:
+                shutil.copyfileobj(resp.raw, f)
+            return True
+        except Exception as e:
+            logger.warning(f"Image DL fail: {url}")
+            return False
 
-            b = BytesIO()
-            image.save(b, "jpeg")
-            return epub.EpubItem(
-                file_name="cover_image.jpg",
-                media_type="image/jpeg",
-                content=b.getvalue(),
+
+# --- Phase 1: Downloader ---
+
+
+class NovelDownloader:
+    def __init__(self, ln: LightNovel, base_folder: str):
+        self.ln = ln
+        self.base_folder = base_folder
+        self.images_folder = join(base_folder, "images")
+        if not exists(self.base_folder):
+            os.makedirs(self.base_folder)
+        if not exists(self.images_folder):
+            os.makedirs(self.images_folder)
+
+    def create_metadata_file(self):
+        print(f"Updating metadata for: {self.ln.name}")
+        local_cover_path = ""
+        if self.ln.main_cover:
+            ext = "jpg"
+            if "png" in self.ln.main_cover:
+                ext = "png"
+            fname = f"main_cover.{ext}"
+            save_path = join(self.images_folder, fname)
+            if NetworkManager.download_image_to_disk(self.ln.main_cover, save_path):
+                local_cover_path = f"images/{fname}"
+
+        # *** NEW: Add Volume Order List ***
+        volume_list = []
+        for i, vol in enumerate(self.ln.volumes):
+            volume_list.append(
+                {
+                    "order": i + 1,
+                    "name": vol.name,
+                    "filename": TextUtils.format_filename(vol.name) + ".json",
+                    "url": vol.url,
+                }
             )
-        except:
-            return None
 
-    def make_intro_page(self, is_merged=False) -> epub.EpubHtml:
-        """Adapted from Colab's intro HTML structure."""
-        intro_html = f"""
-            <div style="text-align: center; margin-top: 5%;">
-                <h1>{self.light_novel.name}</h1>
-        """
+        metadata = {
+            "novel_name": self.ln.name,
+            "author": self.ln.author,
+            "summary": self.ln.summary,
+            "cover_image_local": local_cover_path,
+            "url": self.ln.url,
+            "tool_version": "3.4.0",
+            "volumes": volume_list,  # Store the order map
+        }
 
-        if not is_merged and self.volume:
-            intro_html += f"<h3>{self.volume.name}</h3>"
+        with open(join(self.base_folder, "metadata.json"), "w", encoding="utf-8") as f:
+            json.dump(metadata, f, ensure_ascii=False, indent=2)
 
-        intro_html += f"""
-                <h3>Tác giả: {self.light_novel.author}</h3>
-                <hr style="width: 50%;"/>
-                {self.light_novel.series_info}
-                <div style="text-align: justify; margin: 30px 10px;">
-                    <h4 style="text-align: center">Tóm tắt</h4>
-                    {self.light_novel.summary}
-                </div>
-            </div>
-        """
-
-        # Cover logic
-        cover_url = (
-            self.light_novel.main_cover
-            if is_merged
-            else (self.volume.cover_img if self.volume else "")
-        )
-        cover_item = self.make_cover_image(cover_url)
-
-        if cover_item:
-            self.book.add_item(cover_item)
-            self.book.set_cover("cover.jpg", cover_item.content)
-            # Add image tag to intro html
-            img_tag = f'<img src="cover_image.jpg" alt="Cover" style="max-height: 600px; object-fit: contain;">'
-            intro_html = img_tag + intro_html
-
-        return epub.EpubHtml(
-            title="Giới thiệu",
-            file_name="intro.xhtml",
-            content=intro_html,
-            uid="intro_page",
-        )
-
-    def _process_chapter_content(
-        self, data: Tuple
-    ) -> Optional[Tuple[int, epub.EpubHtml]]:
-        """Process a single chapter. Adapted from Colab logic but using Local Network."""
-        idx, name, url, file_prefix = data
+    def _process_chapter(self, data: Tuple[int, Chapter]) -> Dict:
+        idx, chapter = data
         try:
-            resp = NetworkManager.check_available_request(url)
+            resp = NetworkManager.check_available_request(chapter.url)
             soup = BeautifulSoup(resp.text, HTML_PARSER)
-
             content_div = soup.find("div", id="chapter-content")
             if not content_div:
                 return None
 
-            # Clean content (Colab logic)
             for bad in content_div.find_all(
                 ["div", "p", "a"],
                 class_=["d-none", "d-md-block", "flex", "note-content"],
             ):
                 bad.decompose()
 
-            # Process Images
             for i, img in enumerate(content_div.find_all("img")):
-                img_src = img.get("src")
-                if not img_src or "chapter-banners" in img_src:
+                src = img.get("src")
+                if not src or "chapter-banners" in src:
                     img.decompose()
                     continue
 
-                img_obj = ImageManager.get_image(img_src)
-                if img_obj:
-                    img_filename = f"{file_prefix}img_{idx}_{i}.jpg"
-                    b = BytesIO()
-                    img_obj.save(b, "jpeg")
+                ext = "jpg"
+                if "png" in src:
+                    ext = "png"
+                elif "gif" in src:
+                    ext = "gif"
 
-                    epub_img = epub.EpubItem(
-                        file_name=f"images/{img_filename}",
-                        media_type="image/jpeg",
-                        content=b.getvalue(),
-                    )
-                    self.book.add_item(epub_img)
-
-                    img["src"] = f"images/{img_filename}"
+                local_name = f"chap_{idx}_img_{i}.{ext}"
+                if NetworkManager.download_image_to_disk(
+                    src, join(self.images_folder, local_name)
+                ):
+                    img["src"] = f"images/{local_name}"
                     if "style" in img.attrs:
                         del img["style"]
+                    if "onclick" in img.attrs:
+                        del img["onclick"]
+                else:
+                    img.decompose()
 
-            # Clean empty tags
-            for element in content_div.find_all(["p", "div", "span", "br"]):
-                if not element.get_text(strip=True) and not element.find("img"):
-                    element.decompose()
+            for el in content_div.find_all(["p", "div", "span"]):
+                if not el.get_text(strip=True) and not el.find("img"):
+                    el.decompose()
 
-            # Handle Notes (Local logic)
-            note_divs = soup.find_all("div", id=re.compile("^note"))
-            content_str = str(content_div)
-            for div in note_divs:
+            for div in soup.find_all("div", id=re.compile("^note")):
                 nid = div.get("id")
-                ncontent = div.find("span", class_="note-content_real")
-                if nid and ncontent:
-                    content_str = content_str.replace(
-                        f"[{nid}]", f"(Note: {ncontent.text})"
-                    )
+                ncont = div.find("span", class_="note-content_real")
+                if nid and ncont:
+                    target = content_div.find("a", id=f"a-{nid}")
+                    if target:
+                        target.replace_with(f" (Note: {ncont.text.strip()}) ")
 
-            # Final HTML
-            html_content = f"""
-                <h2>{name}</h2>
-                <div id="content">{content_str}</div>
-            """
-
-            fname = f"{file_prefix}chap_{idx}.xhtml"
-            chapter_item = epub.EpubHtml(
-                title=name, file_name=fname, content=html_content, uid=fname
-            )
-            chapter_item.add_link(
-                href="style/nav.css", rel="stylesheet", type="text/css"
-            )
-
-            return (idx, chapter_item)
-
+            return {
+                "title": chapter.name,
+                "url": chapter.url,
+                "content": str(content_div),
+                "index": idx,
+            }
         except Exception as e:
-            logger.error(f"Error processing chapter {url}: {e}")
+            logger.error(f"Err {chapter.url}: {e}")
             return None
 
-    def make_chapters(
-        self, volume: Volume, global_start_index: int = 1, file_prefix: str = ""
-    ) -> List[epub.EpubHtml]:
-        # Convert List[Chapter] to data tuples for processing
-        tasks = []
-        for i, chapter in enumerate(volume.chapters):
-            tasks.append(
-                (global_start_index + i, chapter.name, chapter.url, file_prefix)
-            )
+    def download_volume(self, volume: Volume):
+        json_filename = TextUtils.format_filename(volume.name) + ".json"
+        json_path = join(self.base_folder, json_filename)
 
-        pool = ThreadPool(THREAD_NUM)
-        results = []
-        try:
-            print(f"Downloading {len(tasks)} chapters from {volume.name}...")
+        existing_chapters = {}
+        if exists(json_path):
+            try:
+                with open(json_path, "r", encoding="utf-8") as f:
+                    old_data = json.load(f)
+                    for ch in old_data.get("chapters", []):
+                        if ch.get("content") and len(ch["content"]) > 50:
+                            existing_chapters[ch["url"]] = ch
+            except Exception:
+                logger.warning("Existing JSON corrupt.")
+
+        tasks = []
+        final_chapters = []
+
+        print(f"Processing Volume: {volume.name}")
+        print(f"Found {len(existing_chapters)}/{len(volume.chapters)} cached.")
+
+        for i, chap in enumerate(volume.chapters):
+            if chap.url in existing_chapters:
+                data = existing_chapters[chap.url]
+                data["index"] = i
+                final_chapters.append(data)
+            else:
+                tasks.append((i, chap))
+
+        if tasks:
+            print(f"Downloading {len(tasks)} missing chapters...")
+            pool = ThreadPool(THREAD_NUM)
             results = list(
                 tqdm.tqdm(
-                    pool.imap_unordered(self._process_chapter_content, tasks),
-                    total=len(tasks),
+                    pool.imap_unordered(self._process_chapter, tasks), total=len(tasks)
                 )
             )
-        finally:
             pool.close()
             pool.join()
 
-        # Sort by index
-        results = sorted([r for r in results if r], key=lambda x: x[0])
-        return [r[1] for r in results]
+            for res in results:
+                if res:
+                    final_chapters.append(res)
 
-    def create_epub(self, ln: LightNovel):
-        """Standard mode: One EPUB per volume."""
-        self.light_novel = ln
+        final_chapters.sort(key=lambda x: x["index"])
 
-        css_item = epub.EpubItem(
-            uid="style_nav",
-            file_name="style/nav.css",
-            media_type="text/css",
-            content=self.css_style,
+        vol_cover_local = ""
+        if volume.cover_img:
+            ext = "jpg"
+            fname = f"vol_cover_{TextUtils.format_filename(volume.name)}.{ext}"
+            if NetworkManager.download_image_to_disk(
+                volume.cover_img, join(self.images_folder, fname)
+            ):
+                vol_cover_local = f"images/{fname}"
+
+        volume_data = {
+            "volume_name": volume.name,
+            "volume_url": volume.url,
+            "cover_image_local": vol_cover_local,
+            "chapters": final_chapters,
+        }
+
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(volume_data, f, ensure_ascii=False, indent=2)
+        print(f"Saved: {json_path}")
+
+
+# --- Phase 2: EPUB Builder ---
+
+
+class EpubBuilder:
+    def __init__(self, base_folder: str):
+        self.base_folder = base_folder
+        self.meta = {}
+        meta_path = join(base_folder, "metadata.json")
+        if exists(meta_path):
+            with open(meta_path, "r", encoding="utf-8") as f:
+                self.meta = json.load(f)
+        else:
+            self.meta = {
+                "novel_name": "Unknown",
+                "author": "Unknown",
+                "summary": "",
+                "cover_image_local": "",
+            }
+
+        self.css = """
+            body { margin: 0; padding: 5px; text-align: justify; line-height: 1.4em; }
+            h1, h2, h3 { text-align: center; margin: 1em 0; font-weight: bold; }
+            img { display: block; margin: 10px auto; max-width: 100%; height: auto; }
+            .center { text-align: center; }
+        """
+
+    def _get_img(self, path: str):
+        full_path = join(self.base_folder, path)
+        if exists(full_path):
+            with open(full_path, "rb") as f:
+                return epub.EpubItem(
+                    file_name=path.replace("\\", "/"),
+                    media_type="image/jpeg",
+                    content=f.read(),
+                )
+        return None
+
+    def make_intro(self, vol_name: str = ""):
+        html = f"""
+            <div style="text-align: center; margin-top: 5%;">
+                <h1>{self.meta["novel_name"]}</h1>
+                <h3>{vol_name}</h3>
+                <p><b>Tác giả:</b> {self.meta["author"]}</p>
+                <hr/>
+                <div style="text-align: justify;">{self.meta["summary"].replace(chr(10), "<br/>")}</div>
+            </div>
+        """
+        return epub.EpubHtml(title="Giới thiệu", file_name="intro.xhtml", content=html)
+
+    def build_volume(self, json_file: str):
+        with open(join(self.base_folder, json_file), "r", encoding="utf-8") as f:
+            vol_data = json.load(f)
+        book = epub.EpubBook()
+        book.set_title(f"{vol_data['volume_name']} - {self.meta['novel_name']}")
+        book.set_language("vi")
+        book.add_author(self.meta["author"])
+
+        css = epub.EpubItem(
+            uid="style", file_name="style.css", media_type="text/css", content=self.css
         )
+        book.add_item(css)
 
-        for volume in ln.volumes:
-            fname = TextUtils.format_filename(f"{volume.name} - {ln.name}") + ".epub"
-            fpath = join("downloaded", TextUtils.format_filename(ln.name), fname)
-
-            if isfile(fpath):
-                print(f"Skipping {fname} (Already exists)")
-                continue
-
-            self.book = epub.EpubBook()
-            self.book.set_identifier(volume.url)
-            self.book.set_title(f"{volume.name} - {ln.name}")
-            self.book.set_language("vi")
-            self.book.add_author(ln.author)
-            self.book.add_item(css_item)
-            self.volume = volume
-
-            intro = self.make_intro_page(is_merged=False)
-            intro.add_item(css_item)
-            self.book.add_item(intro)
-
-            chapters = self.make_chapters(volume)
-            for c in chapters:
-                self.book.add_item(c)
-
-            self.book.spine = ["cover", intro, "nav"] + chapters
-            self.book.add_item(epub.EpubNcx())
-            self.book.add_item(epub.EpubNav())
-
-            self._write_file(fpath)
-
-    def create_merged_epub(self, ln: LightNovel, selected_volumes: List[Volume]):
-        """Merge mode: One EPUB for all selected volumes."""
-        self.light_novel = ln
-        self.book = epub.EpubBook()
-        self.book.set_identifier(ln.url)
-        self.book.set_title(f"{ln.name} [Merged]")
-        self.book.set_language("vi")
-        self.book.add_author(ln.author)
-
-        css_item = epub.EpubItem(
-            uid="style_nav",
-            file_name="style/nav.css",
-            media_type="text/css",
-            content=self.css_style,
+        cover_path = vol_data.get("cover_image_local") or self.meta.get(
+            "cover_image_local"
         )
-        self.book.add_item(css_item)
+        if cover_path:
+            c_item = self._get_img(cover_path)
+            if c_item:
+                book.set_cover("cover.jpg", c_item.content)
 
-        # Global Intro
-        intro = self.make_intro_page(is_merged=True)
-        intro.add_item(css_item)
-        self.book.add_item(intro)
+        intro = self.make_intro(vol_data["volume_name"])
+        intro.add_item(css)
+        book.add_item(intro)
 
-        spine = ["cover", intro, "nav"]
+        spine = ["nav", intro]
+        added_img = set()
+
+        for chap in vol_data["chapters"]:
+            soup = BeautifulSoup(chap["content"], HTML_PARSER)
+            for img in soup.find_all("img"):
+                src = img.get("src")
+                if src and src not in added_img:
+                    itm = self._get_img(src)
+                    if itm:
+                        book.add_item(itm)
+                        added_img.add(src)
+
+            c_page = epub.EpubHtml(
+                title=chap["title"],
+                file_name=f"c{chap['index']}.xhtml",
+                content=f"<h2>{chap['title']}</h2>{str(soup)}",
+            )
+            c_page.add_item(css)
+            book.add_item(c_page)
+            spine.append(c_page)
+
+        book.spine = spine
+        book.add_item(epub.EpubNcx())
+        book.add_item(epub.EpubNav())
+        out = join(
+            self.base_folder,
+            TextUtils.format_filename(
+                f"{vol_data['volume_name']} - {self.meta['novel_name']}.epub"
+            ),
+        )
+        epub.write_epub(out, book, {})
+        print(f"Created: {out}")
+
+    def build_merged(self, json_files: List[str]):
+        # *** NEW: Auto-Sort based on Metadata ***
+        if "volumes" in self.meta:
+            # Create a map: filename -> order index
+            order_map = {v["filename"]: v["order"] for v in self.meta["volumes"]}
+            # Sort: items with order come first, others at the end
+            json_files.sort(key=lambda x: order_map.get(x, 9999))
+            print("Files auto-sorted based on metadata order.")
+
+        book = epub.EpubBook()
+        book.set_title(f"{self.meta['novel_name']} [Full]")
+        book.set_language("vi")
+        book.add_author(self.meta["author"])
+        css = epub.EpubItem(
+            uid="style", file_name="style.css", media_type="text/css", content=self.css
+        )
+        book.add_item(css)
+
+        if self.meta.get("cover_image_local"):
+            c_item = self._get_img(self.meta["cover_image_local"])
+            if c_item:
+                book.set_cover("cover.jpg", c_item.content)
+
+        intro = self.make_intro("Toàn tập")
+        intro.add_item(css)
+        book.add_item(intro)
+
+        spine = ["nav", intro]
         toc = [intro]
+        added_img = set()
 
-        global_idx = 1
+        for jf in json_files:
+            print(f"Merging: {jf}")
+            with open(join(self.base_folder, jf), "r", encoding="utf-8") as f:
+                vol_data = json.load(f)
+            sep_html = f"<div style='text-align:center; margin-top:30vh'><h1>{vol_data['volume_name']}</h1></div>"
+            if vol_data.get("cover_image_local"):
+                if vol_data["cover_image_local"] not in added_img:
+                    itm = self._get_img(vol_data["cover_image_local"])
+                    if itm:
+                        book.add_item(itm)
+                        added_img.add(vol_data["cover_image_local"])
+                sep_html = (
+                    f"<div class='center'><img src='{vol_data['cover_image_local']}'/></div>"
+                    + sep_html
+                )
 
-        for i, volume in enumerate(selected_volumes):
-            self.volume = volume
-            OutputFormatter.print_formatted("Processing Volume", volume.name)
-
-            # Volume Separator Page
-            vol_id = f"vol_{i + 1}"
-            vol_html = f"""
-                <div style="text-align: center; margin-top: 30vh;">
-                    <h1>{volume.name}</h1>
-                </div>
-            """
-            vol_page = epub.EpubHtml(
-                title=volume.name,
-                file_name=f"{vol_id}.xhtml",
-                content=vol_html,
-                uid=vol_id,
+            sep_page = epub.EpubHtml(
+                title=vol_data["volume_name"],
+                file_name=f"vol_{TextUtils.format_filename(vol_data['volume_name'])}.xhtml",
+                content=sep_html,
             )
-            vol_page.add_item(css_item)
-            self.book.add_item(vol_page)
-            spine.append(vol_page)
+            sep_page.add_item(css)
+            book.add_item(sep_page)
+            spine.append(sep_page)
 
-            # Chapters
-            # We add a prefix (v1_, v2_) to filenames to ensure uniqueness in the merged file
-            vol_prefix = f"v{i + 1}_"
-            chapters = self.make_chapters(
-                volume, global_start_index=global_idx, file_prefix=vol_prefix
-            )
+            vol_chaps = []
+            for chap in vol_data["chapters"]:
+                soup = BeautifulSoup(chap["content"], HTML_PARSER)
+                for img in soup.find_all("img"):
+                    src = img.get("src")
+                    if src and src not in added_img:
+                        itm = self._get_img(src)
+                        if itm:
+                            book.add_item(itm)
+                            added_img.add(src)
+                fname = f"v{TextUtils.format_filename(vol_data['volume_name'])}_c{chap['index']}.xhtml"
+                c_page = epub.EpubHtml(
+                    title=chap["title"],
+                    file_name=fname,
+                    content=f"<h2>{chap['title']}</h2>{str(soup)}",
+                )
+                c_page.add_item(css)
+                book.add_item(c_page)
+                vol_chaps.append(c_page)
 
-            for c in chapters:
-                self.book.add_item(c)
-            spine.extend(chapters)
+            spine.extend(vol_chaps)
+            toc.append((sep_page, vol_chaps))
 
-            # Nested TOC entry: (Volume Page, [List of Chapters])
-            toc.append((vol_page, chapters))
+        book.spine = spine
+        book.toc = toc
+        book.add_item(epub.EpubNcx())
+        book.add_item(epub.EpubNav())
+        out = join(
+            self.base_folder,
+            TextUtils.format_filename(f"{self.meta['novel_name']} - Merged.epub"),
+        )
+        epub.write_epub(out, book, {})
+        print(f"Created Merged EPUB: {out}")
 
-            global_idx += len(chapters) + 1
-            print("-" * LINE_SIZE)
 
-        self.book.spine = spine
-        self.book.toc = toc
-        self.book.add_item(epub.EpubNcx())
-        self.book.add_item(epub.EpubNav())
+# --- Parser ---
 
-        fname = TextUtils.format_filename(f"{ln.name} - Merged") + ".epub"
-        fpath = join("downloaded", TextUtils.format_filename(ln.name), fname)
-        self._write_file(fpath)
 
-    def _write_file(self, path):
-        folder = join("downloaded", TextUtils.format_filename(self.light_novel.name))
-        if not isdir("downloaded"):
-            mkdir("downloaded")
-        if not isdir(folder):
-            mkdir(folder)
-
+class LightNovelInfoParser:
+    def parse(self, url: str) -> Optional[LightNovel]:
+        print("Fetching Novel Info...", end="\r")
         try:
-            epub.write_epub(path, self.book, {})
-            OutputFormatter.print_success("Saved EPUB", path)
-        except Exception as e:
-            print(f"Error saving file: {e}")
-
-
-class LightNovelManager:
-    def parse_ln_info(self, url: str) -> Optional[LightNovel]:
-        """
-        Parses Light Novel info using the logic from the Colab notebook.
-        Includes extracting main cover from style attributes and using Lists for chapters.
-        """
-        try:
-            print("Fetching Novel Info...", end="\r")
             resp = NetworkManager.check_available_request(url)
             soup = BeautifulSoup(resp.text, HTML_PARSER)
-
-            ln = LightNovel()
-            ln.url = url
-
-            # Name
+            ln = LightNovel(url=url)
             name_tag = soup.find("span", "series-name")
             ln.name = name_tag.text.strip() if name_tag else "Unknown"
 
-            # Main Cover (Regex approach from Colab)
-            main_cover_div = soup.find("div", "series-cover")
-            if main_cover_div:
-                img_div = main_cover_div.find("div", "img-in-ratio")
+            cover_div = soup.find("div", "series-cover")
+            if cover_div:
+                img_div = cover_div.find("div", "img-in-ratio")
                 if img_div and "style" in img_div.attrs:
-                    style = img_div["style"]
-                    match = re.search(r'url\([\'"]?([^\'"\)]+)[\'"]?\)', style)
+                    match = re.search(
+                        r'url\([\'"]?([^\'"\)]+)[\'"]?\)', img_div["style"]
+                    )
                     if match:
                         ln.main_cover = match.group(1)
 
-            # Series Info & Author
-            series_info = soup.find("div", "series-information")
-            if series_info:
-                # Remove links for clean info
-                for a in series_info.find_all("a"):
-                    if "href" in a.attrs:
-                        del a.attrs["href"]
-                ln.series_info = str(series_info)
-
-                for item in series_info.find_all("div", "info-item"):
-                    label = item.find(class_="info-name")
+            info_div = soup.find("div", "series-information")
+            if info_div:
+                for item in info_div.find_all("div", "info-item"):
+                    label = item.find("span", "info-name")
                     if label and "Tác giả" in label.text:
-                        val = item.find(class_="info-value")
+                        val = item.find("span", "info-value")
                         if val:
                             ln.author = val.text.strip()
 
-            # Summary (Cleaned)
-            summary_div = soup.find("div", "summary-content")
-            if summary_div:
-                for bad in summary_div.find_all(
+            sum_div = soup.find("div", "summary-content")
+            if sum_div:
+                for bad in sum_div.find_all(
                     ["a", "div", "span"],
                     class_=["see-more", "less-state", "more-state"],
                 ):
                     bad.decompose()
-                ln.summary = "".join([str(x) for x in summary_div.contents]).strip()
+                ln.summary = sum_div.get_text(separator="\n").strip()
 
-            # Volumes (List Structure)
-            vol_sections = soup.find_all("section", "volume-list")
-            for sect in vol_sections:
+            for sect in soup.find_all("section", "volume-list"):
                 vol = Volume()
-                title_elem = sect.find("span", "sect-title")
-                vol.name = title_elem.text.strip() if title_elem else "Unknown Volume"
+                title = sect.find("span", "sect-title")
+                vol.name = title.text.strip() if title else "Unknown Vol"
 
-                # Volume Cover
-                cover_div = sect.find("div", "volume-cover")
-                if cover_div:
-                    img_div = cover_div.find("div", "img-in-ratio")
-                    if img_div and "style" in img_div.attrs:
+                v_cover = sect.find("div", "volume-cover")
+                if v_cover:
+                    a = v_cover.find("a")
+                    if a:
+                        vol.url = TextUtils.reformat_url(url, a["href"])
+                    img = v_cover.find("div", "img-in-ratio")
+                    if img and "style" in img.attrs:
                         match = re.search(
-                            r'url\([\'"]?([^\'"\)]+)[\'"]?\)', img_div["style"]
+                            r'url\([\'"]?([^\'"\)]+)[\'"]?\)', img["style"]
                         )
                         if match:
                             vol.cover_img = match.group(1)
 
-                    a_tag = cover_div.find("a")
-                    if a_tag:
-                        vol.url = TextUtils.reformat_url(url, a_tag["href"])
-
-                # Chapters (Append to List)
-                chap_list = sect.find("ul", "list-chapters")
-                if chap_list:
-                    for li in chap_list.find_all("li"):
+                ul = sect.find("ul", "list-chapters")
+                if ul:
+                    for li in ul.find_all("li"):
                         a = li.find("a")
                         if a:
                             c_url = TextUtils.reformat_url(url, a["href"])
-                            # Colab logic: Append object/dict to list
                             vol.chapters.append(Chapter(name=a.text.strip(), url=c_url))
-
                 ln.volumes.append(vol)
 
-            OutputFormatter.print_success("Fetched Info", ln.name)
+            print(f"Parsed: {ln.name} | Cover found: {bool(ln.main_cover)}")
             return ln
-
         except Exception as e:
             logger.error(f"Parse Error: {e}")
             return None
 
-    def start(self, ln_url: str, is_merge: bool):
-        ln = self.parse_ln_info(ln_url)
-        if not ln or not ln.volumes:
-            print("Failed to parse novel or no volumes found.")
-            return
 
-        print(f"Novel: {ln.name} | Volumes: {len(ln.volumes)}")
+# --- Application ---
 
-        # Selection UI
-        choices = [f"{v.name} ({len(v.chapters)} chapters)" for v in ln.volumes]
 
-        if is_merge:
-            selected_indices = questionary.checkbox(
-                "Select volumes to MERGE into one file:", choices=choices
-            ).ask()
+class Application:
+    def __init__(self):
+        self.parser = LightNovelInfoParser()
+
+    def run(self):
+        action = questionary.select(
+            "Select Action:",
+            choices=[
+                "Download (Create JSONs)",
+                "Build EPUB (From JSONs)",
+                "Full Process",
+            ],
+        ).ask()
+
+        url = ""
+        ln = None
+        save_dir = ""
+
+        if action != "Build EPUB (From JSONs)":
+            url = questionary.text("Light Novel URL:").ask()
+            ln = self.parser.parse(url)
+            if not ln:
+                return
+            save_dir = join("saved_data", TextUtils.format_filename(ln.name))
         else:
-            choices.insert(0, "All volumes")
-            selected_indices = questionary.checkbox(
-                "Select volumes to Download (Separate files):", choices=choices
+            if not exists("saved_data"):
+                return
+            folders = [
+                f for f in os.listdir("saved_data") if isdir(join("saved_data", f))
+            ]
+            if not folders:
+                return
+            fname = questionary.select("Select Folder:", choices=folders).ask()
+            save_dir = join("saved_data", fname)
+
+        if action in ["Download (Create JSONs)", "Full Process"]:
+            dl = NovelDownloader(ln, save_dir)
+            dl.create_metadata_file()
+
+            opts = [v.name for v in ln.volumes]
+            opts.insert(0, "All Volumes")
+            sel = questionary.checkbox("Select Volumes:", choices=opts).ask()
+            if not sel:
+                return
+
+            targets = (
+                ln.volumes
+                if "All Volumes" in sel
+                else [v for v in ln.volumes if v.name in sel]
+            )
+
+            for v in targets:
+                dl.download_volume(v)
+
+        if action in ["Build EPUB (From JSONs)", "Full Process"]:
+            builder = EpubBuilder(save_dir)
+            jsons = [
+                f
+                for f in os.listdir(save_dir)
+                if f.endswith(".json") and f != "metadata.json"
+            ]
+            if not jsons:
+                print("No volume JSONs found.")
+                return
+
+            btype = questionary.select(
+                "Mode:", choices=["Separate EPUBs", "Merged EPUB"]
             ).ask()
+            sel_jsons = questionary.checkbox("Select Volumes:", choices=jsons).ask()
 
-        if not selected_indices:
-            print("No volumes selected.")
-            return
+            if not sel_jsons:
+                return
 
-        engine = EpubEngine()
-
-        if is_merge:
-            # Filter volumes based on selection text
-            selected_vols = []
-            for i, c in enumerate(choices):
-                if c in selected_indices:
-                    selected_vols.append(ln.volumes[i])
-
-            engine.create_merged_epub(ln, selected_vols)
-        else:
-            # Standard Mode
-            if "All volumes" in selected_indices:
-                engine.create_epub(ln)
+            if btype == "Separate EPUBs":
+                for j in sel_jsons:
+                    builder.build_volume(j)
             else:
-                # Filter volumes
-                target_vols = []
-                # choices has 'All volumes' at index 0, so offset is needed
-                real_choices = choices[1:]
-                for i, c in enumerate(real_choices):
-                    if c in selected_indices:
-                        target_vols.append(ln.volumes[i])
-
-                ln.volumes = target_vols
-                engine.create_epub(ln)
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Hako2Epub Downloader")
-    parser.add_argument("url", nargs="?", help="URL of the light novel")
-    parser.add_argument(
-        "-m", "--merge", action="store_true", help="Merge mode (Single File)"
-    )
-
-    args = parser.parse_args()
-
-    manager = LightNovelManager()
-
-    target_url = args.url
-    is_merge = args.merge
-
-    if not target_url:
-        target_url = questionary.text("Enter Light Novel URL:").ask()
-        if not is_merge:
-            is_merge = questionary.confirm(
-                "Do you want to MERGE volumes into one file?"
-            ).ask()
-
-    if target_url:
-        manager.start(target_url, is_merge)
+                builder.build_merged(sel_jsons)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        Application().run()
+    except KeyboardInterrupt:
+        print("\nExit.")
