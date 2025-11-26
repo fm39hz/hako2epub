@@ -1158,6 +1158,19 @@ class EpubEngine:
         """
         self.light_novel = ln
         for volume in ln.volumes:
+            # Check if EPUB already exists
+            filename = TextUtils.format_filename(f"{volume.name}-{ln.name}") + ".epub"
+            folder_name = TextUtils.format_filename(ln.name)
+            full_folder_path = join("downloaded", folder_name)
+            filepath = join(full_folder_path, filename)
+
+            if isfile(filepath):
+                OutputFormatter.print_formatted(
+                    "Skipping existing volume: ", volume.name, info_style="bold fg:yellow"
+                )
+                print("-" * LINE_SIZE)
+                continue
+
             OutputFormatter.print_formatted(
                 "Processing volume: ", volume.name, info_style="bold fg:cyan"
             )
