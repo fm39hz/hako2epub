@@ -1,6 +1,6 @@
 """
 hako2epub - A tool to download light novels from ln.hako.vn / docln.net
-Version: 3.8.0 (EPUB 3 Popup Footnotes Support)
+Version: 3.9.0 (Image Integrity Check & Deep Caching Validation)
 """
 
 import argparse
@@ -175,8 +175,14 @@ class NetworkManager:
     def download_image_to_disk(url: str, save_path: str) -> bool:
         if not url:
             return False
+        # 3.9.0 Change: Verify file size > 0
         if exists(save_path):
-            return True
+            if os.path.getsize(save_path) > 0:
+                return True
+            else:
+                # File exists but empty, re-download
+                os.remove(save_path)
+
         if "imgur.com" in url and "." not in url[-5:]:
             url += ".jpg"
         try:
@@ -231,7 +237,7 @@ class NovelDownloader:
             "summary": self.ln.summary,
             "cover_image_local": local_cover_path,
             "url": self.ln.url,
-            "tool_version": "3.8.0",
+            "tool_version": "3.9.0",
             "volumes": volume_list,
         }
 
@@ -248,7 +254,6 @@ class NovelDownloader:
             if not content_div:
                 return None
 
-            # Clean garbage
             for bad in content_div.find_all(
                 ["div", "p", "a"],
                 class_=["d-none", "d-md-block", "flex", "note-content"],
@@ -281,50 +286,31 @@ class NovelDownloader:
                 else:
                     img.decompose()
 
-            # Clean empty text
             for el in content_div.find_all(["p", "div", "span"]):
                 if not el.get_text(strip=True) and not el.find("img"):
                     el.decompose()
 
-            # *** NEW: Handle EPUB 3 Popup Footnotes ***
+            # Handle Footnotes (Popup)
             note_map = {}
-
-            # 1. Find and extract all note definitions at the bottom
-            # Look for divs with id="noteXXXXX"
-            note_divs = soup.find_all("div", id=re.compile(r"^note\d+"))
+            note_divs = list(soup.find_all("div", id=re.compile(r"^note\d+")))
 
             for div in note_divs:
                 nid = div.get("id")
-                # The real content is usually in a span with class 'note-content_real'
                 content_span = div.find("span", class_="note-content_real")
                 if content_span:
-                    # Store the content and remove the div from HTML
                     note_map[nid] = content_span.get_text().strip()
-
-                # Remove the note definition from the bottom of the text
                 div.decompose()
 
-            # Also remove the "Ghi chú" header container if it exists
             note_reg = soup.find("div", class_="note-reg")
             if note_reg:
                 note_reg.decompose()
 
-            # 2. Replace markers in the main text and append <aside>
-            # We work on the string representation to easily replace [noteID]
             html_content = str(content_div)
             footnotes_html = ""
 
             for nid, content in note_map.items():
-                # Create the anchor link with epub:type="noteref"
-                # We replace [note12345] with a superscript link like (*) or [1]
-                # Using (*) as a generic marker
                 link_html = f'<a epub:type="noteref" href="#{nid}" class="footnote-link" style="text-decoration: none; vertical-align: super; font-size: 0.7em; color: blue;">(*)</a>'
-
-                # Hako uses [noteID] in the text body
                 html_content = html_content.replace(f"[{nid}]", link_html)
-
-                # Create the aside block for the popup
-                # epub:type="footnote" tells readers this is a popup note
                 footnote_block = f'''
                 <aside id="{nid}" epub:type="footnote" class="footnote-content">
                     <div style="font-weight: bold; margin-bottom: 0.5em; color: #555;">Ghi chú:</div>
@@ -333,7 +319,6 @@ class NovelDownloader:
                 '''
                 footnotes_html += footnote_block
 
-            # Append footnotes at the end of the chapter content
             final_html = html_content + footnotes_html
 
             return {
@@ -345,6 +330,35 @@ class NovelDownloader:
         except Exception as e:
             logger.error(f"Err {chapter.url}: {e}")
             return None
+
+    def _validate_cached_chapter(self, chapter_data: Dict) -> bool:
+        """
+        NEW: Checks if the cached JSON chapter is valid AND if all referenced images exist on disk.
+        """
+        if not chapter_data or "content" not in chapter_data:
+            return False
+
+        # Basic content check
+        if len(chapter_data["content"]) < 50:
+            return False
+
+        # Image Integrity Check
+        try:
+            soup = BeautifulSoup(chapter_data["content"], HTML_PARSER)
+            images = soup.find_all("img")
+            for img in images:
+                src = img.get("src")
+                # If it points to local "images/...", check if file exists
+                if src and src.startswith("images/"):
+                    full_path = join(self.base_folder, src)
+                    # Check exist AND size > 0
+                    if not exists(full_path) or os.path.getsize(full_path) == 0:
+                        # Found a missing image referenced in the JSON, force re-download
+                        return False
+        except Exception:
+            return False
+
+        return True
 
     def download_volume(self, volume: Volume):
         json_filename = TextUtils.format_filename(volume.name) + ".json"
@@ -358,8 +372,7 @@ class NovelDownloader:
                 with open(json_path, "r", encoding="utf-8") as f:
                     old_data = json.load(f)
                     for ch in old_data.get("chapters", []):
-                        if ch.get("content") and len(ch["content"]) > 50:
-                            existing_chapters[ch["url"]] = ch
+                        existing_chapters[ch["url"]] = ch
             except Exception:
                 logger.warning("Existing JSON corrupt.")
 
@@ -367,18 +380,26 @@ class NovelDownloader:
         final_chapters = []
 
         print(f"Processing Volume: {volume.name}")
-        print(f"Found {len(existing_chapters)}/{len(volume.chapters)} cached.")
+
+        cached_count = 0
+        re_download_count = 0
 
         for i, chap in enumerate(volume.chapters):
-            if chap.url in existing_chapters:
-                data = existing_chapters[chap.url]
-                data["index"] = i
-                final_chapters.append(data)
+            cached_data = existing_chapters.get(chap.url)
+
+            # *** NEW: Deep Validation ***
+            if cached_data and self._validate_cached_chapter(cached_data):
+                cached_data["index"] = i
+                final_chapters.append(cached_data)
+                cached_count += 1
             else:
+                if cached_data:
+                    re_download_count += 1
                 tasks.append((i, chap, vol_slug))
 
+        print(f"Cached: {cached_count} | Re-downloading (Missing/Broken): {len(tasks)}")
+
         if tasks:
-            print(f"Downloading {len(tasks)} missing chapters...")
             pool = ThreadPool(THREAD_NUM)
             results = list(
                 tqdm.tqdm(
@@ -398,6 +419,7 @@ class NovelDownloader:
         if volume.cover_img:
             ext = "jpg"
             fname = f"vol_cover_{TextUtils.format_filename(volume.name)}.{ext}"
+            # Also ensure cover exists
             if NetworkManager.download_image_to_disk(
                 volume.cover_img, join(self.images_folder, fname)
             ):
@@ -434,17 +456,12 @@ class EpubBuilder:
                 "cover_image_local": "",
             }
 
-        # CSS supports hidden asides for readers that use popups
-        # For readers that DON'T support popups, we allow them to be shown at the bottom or hidden via CSS?
-        # Standard practice: Readers that support popups will handle the display.
-        # Readers that don't will just display the content inline at the bottom.
         self.css = """
             body { margin: 0; padding: 5px; text-align: justify; line-height: 1.4em; }
             h1, h2, h3 { text-align: center; margin: 1em 0; font-weight: bold; }
             img { display: block; margin: 10px auto; max-width: 100%; height: auto; }
             .center { text-align: center; }
             
-            /* Style for the footnote link in text */
             a.footnote-link {
                 vertical-align: super;
                 font-size: 0.75em;
@@ -453,9 +470,8 @@ class EpubBuilder:
                 margin-left: 2px;
             }
             
-            /* Style for the aside block */
             aside.footnote-content { 
-                display: none; /* Hidden by default, popup readers ignore this or handle it */
+                display: none;
                 margin-top: 1em;
                 padding: 0.5em;
                 border-top: 1px solid #ccc;
@@ -464,7 +480,6 @@ class EpubBuilder:
                 background-color: #f9f9f9;
             }
             
-            /* Media query to show footnotes at bottom for print/dumb readers if needed */
             @media print {
                 aside.footnote-content { display: block; }
             }
