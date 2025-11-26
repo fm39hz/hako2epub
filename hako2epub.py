@@ -1,6 +1,6 @@
 """
 hako2epub - A tool to download light novels from ln.hako.vn / docln.net
-Version: 3.9.0 (Image Integrity Check & Deep Caching Validation)
+Version: 3.10.0 (Smart Footnote merging: (1)[note] -> Link(1))
 """
 
 import argparse
@@ -175,12 +175,10 @@ class NetworkManager:
     def download_image_to_disk(url: str, save_path: str) -> bool:
         if not url:
             return False
-        # 3.9.0 Change: Verify file size > 0
         if exists(save_path):
             if os.path.getsize(save_path) > 0:
                 return True
             else:
-                # File exists but empty, re-download
                 os.remove(save_path)
 
         if "imgur.com" in url and "." not in url[-5:]:
@@ -237,7 +235,7 @@ class NovelDownloader:
             "summary": self.ln.summary,
             "cover_image_local": local_cover_path,
             "url": self.ln.url,
-            "tool_version": "3.9.0",
+            "tool_version": "3.10.0",
             "volumes": volume_list,
         }
 
@@ -290,8 +288,10 @@ class NovelDownloader:
                 if not el.get_text(strip=True) and not el.find("img"):
                     el.decompose()
 
-            # Handle Footnotes (Popup)
+            # *** NEW: Smart Footnote Processing ***
+            # 1. Extract definitions
             note_map = {}
+            # Regex to find note divs like id="note12345"
             note_divs = list(soup.find_all("div", id=re.compile(r"^note\d+")))
 
             for div in note_divs:
@@ -301,16 +301,53 @@ class NovelDownloader:
                     note_map[nid] = content_span.get_text().strip()
                 div.decompose()
 
+            # Remove container
             note_reg = soup.find("div", class_="note-reg")
             if note_reg:
                 note_reg.decompose()
 
             html_content = str(content_div)
-            footnotes_html = ""
 
-            for nid, content in note_map.items():
-                link_html = f'<a epub:type="noteref" href="#{nid}" class="footnote-link" style="text-decoration: none; vertical-align: super; font-size: 0.7em; color: blue;">(*)</a>'
-                html_content = html_content.replace(f"[{nid}]", link_html)
+            # 2. Smart Replace Logic
+            # This counter is for notes that DON'T have a preceding number
+            footnote_counter = 1
+            used_notes = []
+
+            def replace_note_link(match):
+                nonlocal footnote_counter
+                # group 1: preceding text like "(1)" or "[1]"
+                # group 2: the note id like "note12345"
+                preceding_text = match.group(1)
+                note_id = match.group(2)
+
+                if note_id not in note_map:
+                    return match.group(0)  # Keep as is if note def missing
+
+                used_notes.append(note_id)
+
+                # If there was a number before it, use that number as the link text
+                if preceding_text:
+                    label = preceding_text.strip()
+                else:
+                    # Auto-generate number
+                    label = f"[{footnote_counter}]"
+                    footnote_counter += 1
+
+                # Construct EPUB 3 link
+                return f'<a epub:type="noteref" href="#{note_id}" class="footnote-link" style="text-decoration: none; vertical-align: super; font-size: 0.7em; color: blue;">{label}</a>'
+
+            # Regex explanation:
+            # (\(\d+\)|\[\d+\])?  -> Optional Group 1: Matches (1) or [1]
+            # \s* -> Optional whitespace
+            # \[(note\d+)\]       -> Group 2: Matches [note12345], capturing "note12345"
+            pattern = re.compile(r"(\(\d+\)|\[\d+\])?\s*\[(note\d+)\]")
+
+            html_content = pattern.sub(replace_note_link, html_content)
+
+            # 3. Append definitions at the bottom
+            footnotes_html = ""
+            for nid in used_notes:
+                content = note_map.get(nid, "")
                 footnote_block = f'''
                 <aside id="{nid}" epub:type="footnote" class="footnote-content">
                     <div style="font-weight: bold; margin-bottom: 0.5em; color: #555;">Ghi chú:</div>
@@ -318,6 +355,17 @@ class NovelDownloader:
                 </aside>
                 '''
                 footnotes_html += footnote_block
+
+            # Append any unused notes (just in case regex missed them but they exist)
+            for nid, content in note_map.items():
+                if nid not in used_notes:
+                    footnote_block = f'''
+                    <aside id="{nid}" epub:type="footnote" class="footnote-content">
+                        <div style="font-weight: bold; margin-bottom: 0.5em; color: #555;">Ghi chú (Thêm):</div>
+                        <p>{content}</p>
+                    </aside>
+                    '''
+                    footnotes_html += footnote_block
 
             final_html = html_content + footnotes_html
 
@@ -332,38 +380,26 @@ class NovelDownloader:
             return None
 
     def _validate_cached_chapter(self, chapter_data: Dict) -> bool:
-        """
-        NEW: Checks if the cached JSON chapter is valid AND if all referenced images exist on disk.
-        """
         if not chapter_data or "content" not in chapter_data:
             return False
-
-        # Basic content check
         if len(chapter_data["content"]) < 50:
             return False
-
-        # Image Integrity Check
         try:
             soup = BeautifulSoup(chapter_data["content"], HTML_PARSER)
             images = soup.find_all("img")
             for img in images:
                 src = img.get("src")
-                # If it points to local "images/...", check if file exists
                 if src and src.startswith("images/"):
                     full_path = join(self.base_folder, src)
-                    # Check exist AND size > 0
                     if not exists(full_path) or os.path.getsize(full_path) == 0:
-                        # Found a missing image referenced in the JSON, force re-download
                         return False
         except Exception:
             return False
-
         return True
 
     def download_volume(self, volume: Volume):
         json_filename = TextUtils.format_filename(volume.name) + ".json"
         json_path = join(self.base_folder, json_filename)
-
         vol_slug = TextUtils.format_filename(volume.name).lower()
 
         existing_chapters = {}
@@ -386,8 +422,6 @@ class NovelDownloader:
 
         for i, chap in enumerate(volume.chapters):
             cached_data = existing_chapters.get(chap.url)
-
-            # *** NEW: Deep Validation ***
             if cached_data and self._validate_cached_chapter(cached_data):
                 cached_data["index"] = i
                 final_chapters.append(cached_data)
@@ -397,7 +431,7 @@ class NovelDownloader:
                     re_download_count += 1
                 tasks.append((i, chap, vol_slug))
 
-        print(f"Cached: {cached_count} | Re-downloading (Missing/Broken): {len(tasks)}")
+        print(f"Cached: {cached_count} | Re-downloading: {len(tasks)}")
 
         if tasks:
             pool = ThreadPool(THREAD_NUM)
@@ -408,7 +442,6 @@ class NovelDownloader:
             )
             pool.close()
             pool.join()
-
             for res in results:
                 if res:
                     final_chapters.append(res)
@@ -419,7 +452,6 @@ class NovelDownloader:
         if volume.cover_img:
             ext = "jpg"
             fname = f"vol_cover_{TextUtils.format_filename(volume.name)}.{ext}"
-            # Also ensure cover exists
             if NetworkManager.download_image_to_disk(
                 volume.cover_img, join(self.images_folder, fname)
             ):
