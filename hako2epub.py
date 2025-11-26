@@ -610,7 +610,7 @@ class EpubBuilder:
             print("Files auto-sorted based on metadata order.")
 
         book = epub.EpubBook()
-        book.set_title(f"{self.meta['novel_name']} [Full]")
+        book.set_title(f"{self.meta['novel_name']}")
         book.set_language("vi")
         book.add_author(self.meta["author"])
 
@@ -689,7 +689,7 @@ class EpubBuilder:
         book.add_item(epub.EpubNav())
         out = join(
             self.base_folder,
-            TextUtils.format_filename(f"{self.meta['novel_name']} - Merged.epub"),
+            TextUtils.format_filename(f"{self.meta['novel_name']} - Full.epub"),
         )
         epub.write_epub(out, book, {})
         print(f"Created Merged EPUB: {out}")
