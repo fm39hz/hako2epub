@@ -1,6 +1,6 @@
 """
 hako2epub - A tool to download light novels from ln.hako.vn / docln.net
-Version: 3.4.0 (Metadata Volume Ordering & Auto-Sort Build)
+Version: 3.7.0 (Unique Image Filenames with Volume Prefix)
 """
 
 import argparse
@@ -96,10 +96,38 @@ class TextUtils:
 
 class NetworkManager:
     @staticmethod
+    def is_internal_domain(url: str) -> bool:
+        parsed = urlparse(url)
+        domain = parsed.netloc
+        all_internal = DOMAINS + IMAGE_DOMAINS
+        return any(d in domain for d in all_internal)
+
+    @staticmethod
     def check_available_request(url: str, stream: bool = False) -> requests.Response:
         if not url.startswith("http"):
             url = "https://" + url if not url.startswith("//") else "https:" + url
 
+        # 1. External Link Logic (Imgur, etc)
+        if not NetworkManager.is_internal_domain(url):
+            headers = HEADERS.copy()
+            if "Referer" in headers:
+                del headers["Referer"]
+
+            for i in range(3):
+                try:
+                    response = session.get(
+                        url, stream=stream, headers=headers, timeout=30
+                    )
+                    if response.status_code == 200:
+                        return response
+                    elif response.status_code == 404:
+                        break
+                    time.sleep(1)
+                except Exception:
+                    time.sleep(1)
+            raise requests.RequestException(f"Failed external link: {url}")
+
+        # 2. Internal Logic
         parsed = urlparse(url)
         path = parsed.path
         if parsed.query:
@@ -112,10 +140,10 @@ class NetworkManager:
         )
         domains_to_try = IMAGE_DOMAINS[:] if is_image else DOMAINS[:]
 
-        original_domain = parsed.netloc
-        if original_domain in domains_to_try:
-            domains_to_try.remove(original_domain)
-            domains_to_try.insert(0, original_domain)
+        original = parsed.netloc
+        if original in domains_to_try:
+            domains_to_try.remove(original)
+            domains_to_try.insert(0, original)
 
         last_exception = None
 
@@ -188,7 +216,6 @@ class NovelDownloader:
             if NetworkManager.download_image_to_disk(self.ln.main_cover, save_path):
                 local_cover_path = f"images/{fname}"
 
-        # *** NEW: Add Volume Order List ***
         volume_list = []
         for i, vol in enumerate(self.ln.volumes):
             volume_list.append(
@@ -206,15 +233,17 @@ class NovelDownloader:
             "summary": self.ln.summary,
             "cover_image_local": local_cover_path,
             "url": self.ln.url,
-            "tool_version": "3.4.0",
-            "volumes": volume_list,  # Store the order map
+            "tool_version": "3.7.0",
+            "volumes": volume_list,
         }
 
         with open(join(self.base_folder, "metadata.json"), "w", encoding="utf-8") as f:
             json.dump(metadata, f, ensure_ascii=False, indent=2)
 
-    def _process_chapter(self, data: Tuple[int, Chapter]) -> Dict:
-        idx, chapter = data
+    def _process_chapter(self, data: Tuple[int, Chapter, str]) -> Dict:
+        # *** NEW: Unpack image prefix ***
+        idx, chapter, img_prefix = data
+
         try:
             resp = NetworkManager.check_available_request(chapter.url)
             soup = BeautifulSoup(resp.text, HTML_PARSER)
@@ -240,7 +269,9 @@ class NovelDownloader:
                 elif "gif" in src:
                     ext = "gif"
 
-                local_name = f"chap_{idx}_img_{i}.{ext}"
+                # *** NEW: Filename with Volume Prefix ***
+                local_name = f"{img_prefix}_chap_{idx}_img_{i}.{ext}"
+
                 if NetworkManager.download_image_to_disk(
                     src, join(self.images_folder, local_name)
                 ):
@@ -278,6 +309,9 @@ class NovelDownloader:
         json_filename = TextUtils.format_filename(volume.name) + ".json"
         json_path = join(self.base_folder, json_filename)
 
+        # *** NEW: Create a slug for image prefix (lowercase, underscore) ***
+        vol_slug = TextUtils.format_filename(volume.name).lower()
+
         existing_chapters = {}
         if exists(json_path):
             try:
@@ -301,7 +335,8 @@ class NovelDownloader:
                 data["index"] = i
                 final_chapters.append(data)
             else:
-                tasks.append((i, chap))
+                # *** NEW: Pass volume slug to worker ***
+                tasks.append((i, chap, vol_slug))
 
         if tasks:
             print(f"Downloading {len(tasks)} missing chapters...")
@@ -379,13 +414,14 @@ class EpubBuilder:
         return None
 
     def make_intro(self, vol_name: str = ""):
+        summary_html = self.meta.get("summary", "")
         html = f"""
             <div style="text-align: center; margin-top: 5%;">
                 <h1>{self.meta["novel_name"]}</h1>
                 <h3>{vol_name}</h3>
                 <p><b>Tác giả:</b> {self.meta["author"]}</p>
                 <hr/>
-                <div style="text-align: justify;">{self.meta["summary"].replace(chr(10), "<br/>")}</div>
+                <div style="text-align: justify;">{summary_html}</div>
             </div>
         """
         return epub.EpubHtml(title="Giới thiệu", file_name="intro.xhtml", content=html)
@@ -397,6 +433,9 @@ class EpubBuilder:
         book.set_title(f"{vol_data['volume_name']} - {self.meta['novel_name']}")
         book.set_language("vi")
         book.add_author(self.meta["author"])
+
+        if self.meta.get("summary"):
+            book.add_metadata("DC", "description", self.meta["summary"])
 
         css = epub.EpubItem(
             uid="style", file_name="style.css", media_type="text/css", content=self.css
@@ -450,11 +489,8 @@ class EpubBuilder:
         print(f"Created: {out}")
 
     def build_merged(self, json_files: List[str]):
-        # *** NEW: Auto-Sort based on Metadata ***
         if "volumes" in self.meta:
-            # Create a map: filename -> order index
             order_map = {v["filename"]: v["order"] for v in self.meta["volumes"]}
-            # Sort: items with order come first, others at the end
             json_files.sort(key=lambda x: order_map.get(x, 9999))
             print("Files auto-sorted based on metadata order.")
 
@@ -462,6 +498,10 @@ class EpubBuilder:
         book.set_title(f"{self.meta['novel_name']} [Full]")
         book.set_language("vi")
         book.add_author(self.meta["author"])
+
+        if self.meta.get("summary"):
+            book.add_metadata("DC", "description", self.meta["summary"])
+
         css = epub.EpubItem(
             uid="style", file_name="style.css", media_type="text/css", content=self.css
         )
@@ -579,7 +619,7 @@ class LightNovelInfoParser:
                     class_=["see-more", "less-state", "more-state"],
                 ):
                     bad.decompose()
-                ln.summary = sum_div.get_text(separator="\n").strip()
+                ln.summary = "".join([str(x) for x in sum_div.contents]).strip()
 
             for sect in soup.find_all("section", "volume-list"):
                 vol = Volume()
