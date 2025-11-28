@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 DOMAINS = ["docln.net", "ln.hako.vn", "docln.sbs"]
 IMAGE_DOMAINS = ["i.hako.vip", "i.docln.net", "ln.hako.vn"]
 
-THREAD_NUM = 4
+THREAD_NUM = 5
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Referer": "https://docln.net/",
@@ -245,6 +245,7 @@ class NovelDownloader:
 
         try:
             resp = NetworkManager.check_available_request(chapter.url)
+            time.sleep(0.5)
             soup = BeautifulSoup(resp.text, HTML_PARSER)
             content_div = soup.find("div", id="chapter-content")
             if not content_div:
