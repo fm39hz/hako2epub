@@ -287,7 +287,7 @@ class NovelDownloader:
                 if not el.get_text(strip=True) and not el.find("img"):
                     el.decompose()
 
-            # *** Smart Footnote Processing ***
+            # *** Smart Footnote Processing (Hybrid Approach) ***
             # 1. Extract definitions
             note_map = {}
             # Regex to find note divs like id="note12345"
@@ -308,63 +308,53 @@ class NovelDownloader:
             html_content = str(content_div)
 
             # 2. Smart Replace Logic
-            # This counter is for notes that DON'T have a preceding number
             footnote_counter = 1
             used_notes = []
 
             def replace_note_link(match):
                 nonlocal footnote_counter
-                # group 1: preceding text like "(1)" or "[1]"
-                # group 2: the note id like "note12345"
                 preceding_text = match.group(1)
                 note_id = match.group(2)
 
                 if note_id not in note_map:
-                    return match.group(0)  # Keep as is if note def missing
+                    return match.group(0)
 
                 used_notes.append(note_id)
 
-                # If there was a number before it, use that number as the link text
                 if preceding_text:
                     label = preceding_text.strip()
                 else:
-                    # Auto-generate number
                     label = f"[{footnote_counter}]"
                     footnote_counter += 1
 
-                # Construct EPUB 3 link
-                return f'<a epub:type="noteref" href="#{note_id}" class="footnote-link" style="text-decoration: none; vertical-align: super; font-size: 0.7em; color: blue;">{label}</a>'
+                # Construct EPUB 3 link (Works with Apple Books popup)
+                return f'<a epub:type="noteref" href="#{note_id}" class="footnote-link">{label}</a>'
 
-            # Regex explanation:
-            # (\(\d+\)|\[\d+\])?  -> Optional Group 1: Matches (1) or [1]
-            # \s* -> Optional whitespace
-            # \[(note\d+)\]       -> Group 2: Matches [note12345], capturing "note12345"
             pattern = re.compile(r"(\(\d+\)|\[\d+\])?\s*\[(note\d+)\]")
-
             html_content = pattern.sub(replace_note_link, html_content)
 
-            # 3. Append definitions at the bottom
+            # 3. Append definitions at the bottom (Hybrid Style)
             footnotes_html = ""
-            for nid in used_notes:
-                content = note_map.get(nid, "")
-                footnote_block = f'''
+
+            # Helper to create the structured HTML block matching the CSS
+            def create_footnote_block(nid, content, title="Ghi chú"):
+                return f'''
                 <aside id="{nid}" epub:type="footnote" class="footnote-content">
-                    <div style="font-weight: bold; margin-bottom: 0.5em; color: #555;">Ghi chú:</div>
+                    <div class="note-header">{title}:</div>
                     <p>{content}</p>
                 </aside>
                 '''
-                footnotes_html += footnote_block
 
-            # Append any unused notes (just in case regex missed them but they exist)
+            for nid in used_notes:
+                content = note_map.get(nid, "")
+                footnotes_html += create_footnote_block(nid, content, "Ghi chú")
+
+            # Append any unused notes
             for nid, content in note_map.items():
                 if nid not in used_notes:
-                    footnote_block = f'''
-                    <aside id="{nid}" epub:type="footnote" class="footnote-content">
-                        <div style="font-weight: bold; margin-bottom: 0.5em; color: #555;">Ghi chú (Thêm):</div>
-                        <p>{content}</p>
-                    </aside>
-                    '''
-                    footnotes_html += footnote_block
+                    footnotes_html += create_footnote_block(
+                        nid, content, "Ghi chú (Thêm)"
+                    )
 
             final_html = html_content + footnotes_html
 
@@ -487,12 +477,15 @@ class EpubBuilder:
                 "cover_image_local": "",
             }
 
+        # UPDATED CSS (Hybrid Footnotes: Visible in Calibre, Semantic for Apple Books)
         self.css = """
-            body { margin: 0; padding: 5px; text-align: justify; line-height: 1.4em; }
+            body { margin: 0; padding: 5px; text-align: justify; line-height: 1.4em; font-family: serif; }
             h1, h2, h3 { text-align: center; margin: 1em 0; font-weight: bold; }
             img { display: block; margin: 10px auto; max-width: 100%; height: auto; }
+            p { margin-bottom: 1em; text-indent: 1em; }
             .center { text-align: center; }
             
+            /* Footnote Link Styles */
             a.footnote-link {
                 vertical-align: super;
                 font-size: 0.75em;
@@ -501,14 +494,26 @@ class EpubBuilder:
                 margin-left: 2px;
             }
             
+            /* Hybrid Footnotes: Visible block for Calibre, Semantic for Apple Books */
             aside.footnote-content { 
-                display: none;
                 margin-top: 1em;
                 padding: 0.5em;
                 border-top: 1px solid #ccc;
                 font-size: 0.9em;
                 color: #333;
                 background-color: #f9f9f9;
+                display: block; /* Ensure visibility in non-popup readers */
+            }
+            
+            aside.footnote-content p {
+                margin: 0;
+                text-indent: 0;
+            }
+            
+            aside.footnote-content div.note-header {
+                font-weight: bold; 
+                margin-bottom: 0.5em; 
+                color: #555;
             }
             
             @media print {
