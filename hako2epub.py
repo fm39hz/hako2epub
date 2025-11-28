@@ -14,6 +14,7 @@ from os.path import isdir, isfile, join, exists
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
+import html
 
 import questionary
 import requests
@@ -31,7 +32,7 @@ logger = logging.getLogger(__name__)
 DOMAINS = ["docln.net", "ln.hako.vn", "docln.sbs"]
 IMAGE_DOMAINS = ["i.hako.vip", "i.docln.net", "ln.hako.vn"]
 
-THREAD_NUM = 5
+THREAD_NUM = 1
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Referer": "https://docln.net/",
@@ -288,9 +289,7 @@ class NovelDownloader:
                     el.decompose()
 
             # *** Smart Footnote Processing (Hybrid Approach) ***
-            # 1. Extract definitions
             note_map = {}
-            # Regex to find note divs like id="note12345"
             note_divs = list(soup.find_all("div", id=re.compile(r"^note\d+")))
 
             for div in note_divs:
@@ -300,14 +299,12 @@ class NovelDownloader:
                     note_map[nid] = content_span.get_text().strip()
                 div.decompose()
 
-            # Remove container
             note_reg = soup.find("div", class_="note-reg")
             if note_reg:
                 note_reg.decompose()
 
             html_content = str(content_div)
 
-            # 2. Smart Replace Logic
             footnote_counter = 1
             used_notes = []
 
@@ -327,16 +324,13 @@ class NovelDownloader:
                     label = f"[{footnote_counter}]"
                     footnote_counter += 1
 
-                # Construct EPUB 3 link (Works with Apple Books popup)
                 return f'<a epub:type="noteref" href="#{note_id}" class="footnote-link">{label}</a>'
 
             pattern = re.compile(r"(\(\d+\)|\[\d+\])?\s*\[(note\d+)\]")
             html_content = pattern.sub(replace_note_link, html_content)
 
-            # 3. Append definitions at the bottom (Hybrid Style)
             footnotes_html = ""
 
-            # Helper to create the structured HTML block matching the CSS
             def create_footnote_block(nid, content, title="Ghi chú"):
                 return f'''
                 <aside id="{nid}" epub:type="footnote" class="footnote-content">
@@ -349,7 +343,6 @@ class NovelDownloader:
                 content = note_map.get(nid, "")
                 footnotes_html += create_footnote_block(nid, content, "Ghi chú")
 
-            # Append any unused notes
             for nid, content in note_map.items():
                 if nid not in used_notes:
                     footnotes_html += create_footnote_block(
@@ -477,7 +470,7 @@ class EpubBuilder:
                 "cover_image_local": "",
             }
 
-        # UPDATED CSS (Hybrid Footnotes: Visible in Calibre, Semantic for Apple Books)
+        # CSS from TypeScript
         self.css = """
             body { margin: 0; padding: 5px; text-align: justify; line-height: 1.4em; font-family: serif; }
             h1, h2, h3 { text-align: center; margin: 1em 0; font-weight: bold; }
@@ -485,7 +478,14 @@ class EpubBuilder:
             p { margin-bottom: 1em; text-indent: 1em; }
             .center { text-align: center; }
             
-            /* Footnote Link Styles */
+            nav#toc ol { list-style-type: none; padding-left: 0; }
+            nav#toc > ol > li { margin-top: 1em; font-weight: bold; }
+            nav#toc > ol > li > ol { list-style-type: none; padding-left: 1.5em; font-weight: normal; }
+            nav#toc > ol > li > ol > li { margin-top: 0.5em; }
+            nav#toc a { text-decoration: none; color: inherit; }
+            nav#toc a:hover { text-decoration: underline; color: blue; }
+
+            /* Footnote styles */
             a.footnote-link {
                 vertical-align: super;
                 font-size: 0.75em;
@@ -502,24 +502,46 @@ class EpubBuilder:
                 font-size: 0.9em;
                 color: #333;
                 background-color: #f9f9f9;
-                display: block; /* Ensure visibility in non-popup readers */
+                display: block; 
             }
             
             aside.footnote-content p {
                 margin: 0;
                 text-indent: 0;
             }
-            
+
             aside.footnote-content div.note-header {
                 font-weight: bold; 
                 margin-bottom: 0.5em; 
                 color: #555;
             }
-            
-            @media print {
-                aside.footnote-content { display: block; }
-            }
         """
+
+    def sanitize_xhtml(self, html_content: str) -> str:
+        """
+        Replicates sanitizeXhtml from Typescript:
+        1. Replace &nbsp; with &#160;
+        2. Remove empty paragraphs
+        3. Remove consecutive <br>
+        """
+        if not html_content:
+            return ""
+
+        safe = html_content
+        safe = safe.replace("&nbsp;", "&#160;")
+
+        # Remove empty paragraphs: Matches <p> tags containing only whitespace, &nbsp;, or <br>
+        # Python re does not support all flags same as JS, so we use case insensitive
+        pattern_empty_p = re.compile(
+            r"<p[^>]*>(\s|&nbsp;|&#160;|<br\s*\/?>)*<\/p>", re.IGNORECASE
+        )
+        safe = pattern_empty_p.sub("", safe)
+
+        # Remove multiple consecutive <br>
+        pattern_br = re.compile(r"(<br\s*\/?>\s*){3,}", re.IGNORECASE)
+        safe = pattern_br.sub("<br/><br/>", safe)
+
+        return safe.strip()
 
     def _get_img(self, path: str):
         full_path = join(self.base_folder, path)
@@ -533,79 +555,43 @@ class EpubBuilder:
         return None
 
     def make_intro(self, vol_name: str = ""):
-        summary_html = self.meta.get("summary", "")
-        html = f"""
+        # Match TS Intro Format exactly
+        # 1. Title, 2. "Toàn tập" (if full), 3. Author, 4. Main Cover (Page Break), 5. Summary
+
+        summary_html = self.sanitize_xhtml(self.meta.get("summary", ""))
+        title = html.escape(self.meta["novel_name"])
+        author = html.escape(self.meta["author"])
+
+        # Logic for Cover Embedding
+        cover_html = "<hr/>"
+        main_cover_path = self.meta.get("cover_image_local")
+
+        # We need to return the image item so it can be added to the book
+        cover_item = None
+        if main_cover_path:
+            cover_item = self._get_img(main_cover_path)
+            if cover_item:
+                # TS uses page-break-after: always for cover div
+                cover_html = f'<div style="text-align:center; margin: 2em 0; page-break-after: always; break-after: page;"><img src="{main_cover_path}" alt="Cover"/></div>'
+
+        content = f"""
             <div style="text-align: center; margin-top: 5%;">
-                <h1>{self.meta["novel_name"]}</h1>
-                <h3>{vol_name}</h3>
-                <p><b>Tác giả:</b> {self.meta["author"]}</p>
-                <hr/>
-                <div style="text-align: justify;">{summary_html}</div>
+                <h1>{title}</h1>
+                <h3 style="margin-bottom: 0.5em;">{vol_name}</h3>
+                <p><b>Tác giả:</b> {author}</p>
+                
+                {cover_html}
+                
+                <div style="text-align: justify;">
+                    {summary_html}
+                </div>
             </div>
         """
-        return epub.EpubHtml(title="Giới thiệu", file_name="intro.xhtml", content=html)
 
-    def build_volume(self, json_file: str):
-        with open(join(self.base_folder, json_file), "r", encoding="utf-8") as f:
-            vol_data = json.load(f)
-        book = epub.EpubBook()
-        book.set_title(f"{vol_data['volume_name']} - {self.meta['novel_name']}")
-        book.set_language("vi")
-        book.add_author(self.meta["author"])
-
-        if self.meta.get("summary"):
-            book.add_metadata("DC", "description", self.meta["summary"])
-
-        css = epub.EpubItem(
-            uid="style", file_name="style.css", media_type="text/css", content=self.css
+        page = epub.EpubHtml(
+            title="Giới thiệu", file_name="intro.xhtml", content=content
         )
-        book.add_item(css)
-
-        cover_path = vol_data.get("cover_image_local") or self.meta.get(
-            "cover_image_local"
-        )
-        if cover_path:
-            c_item = self._get_img(cover_path)
-            if c_item:
-                book.set_cover("cover.jpg", c_item.content)
-
-        intro = self.make_intro(vol_data["volume_name"])
-        intro.add_item(css)
-        book.add_item(intro)
-
-        spine = ["nav", intro]
-        added_img = set()
-
-        for chap in vol_data["chapters"]:
-            soup = BeautifulSoup(chap["content"], HTML_PARSER)
-            for img in soup.find_all("img"):
-                src = img.get("src")
-                if src and src not in added_img:
-                    itm = self._get_img(src)
-                    if itm:
-                        book.add_item(itm)
-                        added_img.add(src)
-
-            c_page = epub.EpubHtml(
-                title=chap["title"],
-                file_name=f"c{chap['index']}.xhtml",
-                content=f"<h2>{chap['title']}</h2>{str(soup)}",
-            )
-            c_page.add_item(css)
-            book.add_item(c_page)
-            spine.append(c_page)
-
-        book.spine = spine
-        book.add_item(epub.EpubNcx())
-        book.add_item(epub.EpubNav())
-        out = join(
-            self.base_folder,
-            TextUtils.format_filename(
-                f"{vol_data['volume_name']} - {self.meta['novel_name']}.epub"
-            ),
-        )
-        epub.write_epub(out, book, {})
-        print(f"Created: {out}")
+        return page, cover_item
 
     def build_merged(self, json_files: List[str]):
         if "volumes" in self.meta:
@@ -626,46 +612,66 @@ class EpubBuilder:
         )
         book.add_item(css)
 
-        if self.meta.get("cover_image_local"):
-            c_item = self._get_img(self.meta["cover_image_local"])
-            if c_item:
-                book.set_cover("cover.jpg", c_item.content)
+        # --- intro.xhtml & Main Cover ---
+        intro_page, main_cover_item = self.make_intro("Toàn tập")
+        intro_page.add_item(css)
 
-        intro = self.make_intro("Toàn tập")
-        intro.add_item(css)
-        book.add_item(intro)
+        if main_cover_item:
+            book.add_item(main_cover_item)
+            # Set cover metadata (OPF) but do NOT create the default cover page
+            # We use intro.xhtml as the visual start
+            book.set_cover("cover.jpg", main_cover_item.content, create_page=False)
 
-        spine = ["nav", intro]
-        toc = [intro]
+        book.add_item(intro_page)
+
+        # --- Spine & TOC Construction ---
+        # TS Logic: TOC (Nav) -> Intro -> Content
+        spine = [intro_page]
+        toc = [intro_page]  # Nav logic in python maps TOC to NavMap
+
         added_img = set()
+        if main_cover_item:
+            added_img.add(self.meta["cover_image_local"])
 
-        for jf in json_files:
+        for i, jf in enumerate(json_files):
             print(f"Merging: {jf}")
             with open(join(self.base_folder, jf), "r", encoding="utf-8") as f:
                 vol_data = json.load(f)
-            sep_html = f"<div style='text-align:center; margin-top:30vh'><h1>{vol_data['volume_name']}</h1></div>"
-            if vol_data.get("cover_image_local"):
-                if vol_data["cover_image_local"] not in added_img:
-                    itm = self._get_img(vol_data["cover_image_local"])
+
+            # --- Volume Separator (vol_X.xhtml) ---
+            # TS: Centered, Top 30vh, Cover (if exists), H1 Name
+            vol_html_content = ""
+            vol_cover = vol_data.get("cover_image_local")
+
+            if vol_cover:
+                if vol_cover not in added_img:
+                    itm = self._get_img(vol_cover)
                     if itm:
                         book.add_item(itm)
-                        added_img.add(vol_data["cover_image_local"])
-                sep_html = (
-                    f"<div class='center'><img src='{vol_data['cover_image_local']}'/></div>"
-                    + sep_html
-                )
+                        added_img.add(vol_cover)
+                vol_html_content += f'<img src="{vol_cover}" alt="Vol Cover" style="max-height: 50vh;"/>'
+
+            vol_html_content += f"<h1>{html.escape(vol_data['volume_name'])}</h1>"
+
+            sep_html = f"""
+                <div style="text-align: center; margin-top: 30vh;">
+                    {vol_html_content}
+                </div>
+            """
 
             sep_page = epub.EpubHtml(
                 title=vol_data["volume_name"],
-                file_name=f"vol_{TextUtils.format_filename(vol_data['volume_name'])}.xhtml",
+                file_name=f"vol_{i}.xhtml",  # TS uses index based naming
                 content=sep_html,
             )
             sep_page.add_item(css)
             book.add_item(sep_page)
             spine.append(sep_page)
 
+            # --- Chapters ---
             vol_chaps = []
             for chap in vol_data["chapters"]:
+                # Process images in chapter content
                 soup = BeautifulSoup(chap["content"], HTML_PARSER)
                 for img in soup.find_all("img"):
                     src = img.get("src")
@@ -674,11 +680,15 @@ class EpubBuilder:
                         if itm:
                             book.add_item(itm)
                             added_img.add(src)
-                fname = f"v{TextUtils.format_filename(vol_data['volume_name'])}_c{chap['index']}.xhtml"
+
+                # Sanitize content using TS logic
+                clean_content = self.sanitize_xhtml(str(soup))
+
+                fname = f"v{i}_c{chap['index']}.xhtml"
                 c_page = epub.EpubHtml(
                     title=chap["title"],
                     file_name=fname,
-                    content=f"<h2>{chap['title']}</h2>{str(soup)}",
+                    content=f"<h2>{html.escape(chap['title'])}</h2>{clean_content}",
                 )
                 c_page.add_item(css)
                 book.add_item(c_page)
@@ -687,16 +697,84 @@ class EpubBuilder:
             spine.extend(vol_chaps)
             toc.append((sep_page, vol_chaps))
 
-        book.spine = spine
+        # --- Final Assembly ---
+        # eBookLib's EpubNav creates nav.xhtml
+        nav = epub.EpubNav()
+        book.add_item(nav)
+
+        # TS Spine Order: Nav -> Intro -> Vol/Chaps
+        book.spine = ["nav"] + spine
         book.toc = toc
+
         book.add_item(epub.EpubNcx())
-        book.add_item(epub.EpubNav())
+
         out = join(
             self.base_folder,
             TextUtils.format_filename(f"{self.meta['novel_name']} - Full.epub"),
         )
         epub.write_epub(out, book, {})
         print(f"Created Merged EPUB: {out}")
+
+    def build_volume(self, json_file: str):
+        # Adapting single volume build to use same logic
+        with open(join(self.base_folder, json_file), "r", encoding="utf-8") as f:
+            vol_data = json.load(f)
+
+        book = epub.EpubBook()
+        book.set_title(f"{vol_data['volume_name']} - {self.meta['novel_name']}")
+        book.set_language("vi")
+        book.add_author(self.meta["author"])
+
+        css = epub.EpubItem(
+            uid="style", file_name="style.css", media_type="text/css", content=self.css
+        )
+        book.add_item(css)
+
+        intro_page, main_cover_item = self.make_intro(vol_data["volume_name"])
+        intro_page.add_item(css)
+        if main_cover_item:
+            book.add_item(main_cover_item)
+            book.set_cover("cover.jpg", main_cover_item.content, create_page=False)
+        book.add_item(intro_page)
+
+        spine = [intro_page]
+        added_img = set()
+        if main_cover_item:
+            added_img.add(self.meta["cover_image_local"])
+
+        for chap in vol_data["chapters"]:
+            soup = BeautifulSoup(chap["content"], HTML_PARSER)
+            for img in soup.find_all("img"):
+                src = img.get("src")
+                if src and src not in added_img:
+                    itm = self._get_img(src)
+                    if itm:
+                        book.add_item(itm)
+                        added_img.add(src)
+
+            clean = self.sanitize_xhtml(str(soup))
+            c_page = epub.EpubHtml(
+                title=chap["title"],
+                file_name=f"c{chap['index']}.xhtml",
+                content=f"<h2>{html.escape(chap['title'])}</h2>{clean}",
+            )
+            c_page.add_item(css)
+            book.add_item(c_page)
+            spine.append(c_page)
+
+        nav = epub.EpubNav()
+        book.add_item(nav)
+        book.spine = ["nav"] + spine
+        book.add_item(epub.EpubNcx())
+
+        out = join(
+            self.base_folder,
+            TextUtils.format_filename(
+                f"{vol_data['volume_name']} - {self.meta['novel_name']}.epub"
+            ),
+        )
+        epub.write_epub(out, book, {})
+        print(f"Created: {out}")
 
 
 # --- Parser ---
