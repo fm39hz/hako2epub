@@ -39,6 +39,8 @@ IMAGE_DOMAINS = [
     "i2.docln.net",
     "i2.hako.vip",
 ]
+DATA_DIR = "data"
+RESULT_DIR = "result"
 
 THREAD_NUM = 1
 HEADERS = {
@@ -492,8 +494,9 @@ class NovelDownloader:
 class EpubBuilder:
     def __init__(self, base_folder: str, compress_images: bool = True):
         self.base_folder = base_folder
-        self.compress_images = compress_images  # Toggle for compression
+        self.compress_images = compress_images
         self.image_map = {}
+        self.result_root = RESULT_DIR  # "result"
 
         self.meta = {}
         meta_path = join(base_folder, "metadata.json")
@@ -527,6 +530,32 @@ class EpubBuilder:
             aside.footnote-content div.note-header { font-weight: bold; margin-bottom: 0.5em; color: #555; }
         """
 
+    def _get_output_path(self, filename: str, is_merged: bool) -> str:
+        """
+        Determines the final output path based on user rules.
+        1. Merged + Original -> result/<BookName - Full>.epub
+        2. Compressed (Any) -> result/<BookName>/compressed/<filename>
+        3. Separate + Original -> result/<BookName>/original/<filename>
+        """
+        book_name_slug = TextUtils.format_filename(self.meta["novel_name"])
+
+        # Case 1: Merged & Original
+        if is_merged and not self.compress_images:
+            if not exists(self.result_root):
+                os.makedirs(self.result_root)
+            return join(self.result_root, filename)
+
+        # Determine subfolder
+        subfolder = "compressed" if self.compress_images else "original"
+
+        # Path: result/<BookName>/<subfolder>/
+        target_dir = join(self.result_root, book_name_slug, subfolder)
+
+        if not exists(target_dir):
+            os.makedirs(target_dir)
+
+        return join(target_dir, filename)
+
     def sanitize_xhtml(self, html_content: str) -> str:
         if not html_content:
             return ""
@@ -541,11 +570,6 @@ class EpubBuilder:
         return safe.strip()
 
     def process_image(self, rel_path: str) -> Tuple[Optional[epub.EpubItem], str]:
-        """
-        Processes image.
-        If corrupt/truncated: Deletes file from disk and returns None.
-        If valid: Returns EpubItem.
-        """
         if not rel_path:
             return None, ""
 
@@ -557,14 +581,9 @@ class EpubBuilder:
             return None, rel_path
 
         try:
-            # --- VALIDATION STEP (Crucial for detecting truncation) ---
-            # We open the image to check if it's broken, even if we don't compress it.
-            # verify() catches some errors, load() catches truncation.
             with Image.open(full_path) as valid_check:
                 valid_check.load()
-            # --------------------------------------------------------
 
-            # Case 1: No Compression - Read raw file
             if not self.compress_images:
                 with open(full_path, "rb") as f:
                     content = f.read()
@@ -587,7 +606,6 @@ class EpubBuilder:
                 self.image_map[rel_path] = rel_path
                 return item, rel_path
 
-            # Case 2: Compress - Convert to JPEG 75
             img = Image.open(full_path)
             if img.mode in ("RGBA", "P"):
                 img = img.convert("RGB")
@@ -609,7 +627,6 @@ class EpubBuilder:
             return item, new_rel_path
 
         except Exception as e:
-            # --- NEW AUTO-DELETE LOGIC ---
             error_msg = str(e).lower()
             if "truncated" in error_msg or "cannot identify" in error_msg:
                 logger.error(f"CORRUPT FILE FOUND: {rel_path}")
@@ -621,8 +638,7 @@ class EpubBuilder:
                     )
                 except OSError:
                     logger.error("-> Could not delete file (locked?). Delete manually.")
-                return None, ""  # Skip adding this broken image to EPUB
-            # -----------------------------
+                return None, ""
 
             logger.error(f"Image process failed for {rel_path}: {e}")
             return None, rel_path
@@ -641,7 +657,7 @@ class EpubBuilder:
         if main_cover_path:
             item, new_path = self.process_image(main_cover_path)
             cover_item = item
-            if new_path:  # Ensure we use the possibly mapped path
+            if new_path:
                 cover_html = f'<div style="text-align:center; margin: 2em 0; page-break-after: always; break-after: page;"><img src="{new_path}" alt="Cover"/></div>'
 
         content = f"""
@@ -687,8 +703,6 @@ class EpubBuilder:
 
         if main_cover_item:
             book.add_item(main_cover_item)
-            # Default to generic cover.jpg, or use mapped extension?
-            # EpubBook.set_cover content argument just needs bytes.
             book.set_cover("cover.jpg", main_cover_item.content, create_page=False)
 
         book.add_item(intro_page)
@@ -759,12 +773,12 @@ class EpubBuilder:
         book.toc = toc
         book.add_item(epub.EpubNcx())
 
-        out = join(
-            self.base_folder,
-            TextUtils.format_filename(f"{self.meta['novel_name']} - Full.epub"),
-        )
-        epub.write_epub(out, book, {})
-        print(f"Created Merged EPUB: {out}")
+        # Determine Output Path
+        filename = TextUtils.format_filename(f"{self.meta['novel_name']} Full.epub")
+        out_path = self._get_output_path(filename, is_merged=True)
+
+        epub.write_epub(out_path, book, {})
+        print(f"Created Merged EPUB: {out_path}")
 
     def build_volume(self, json_file: str):
         with open(join(self.base_folder, json_file), "r", encoding="utf-8") as f:
@@ -816,14 +830,14 @@ class EpubBuilder:
         book.spine = ["nav"] + spine
         book.add_item(epub.EpubNcx())
 
-        out = join(
-            self.base_folder,
-            TextUtils.format_filename(
-                f"{vol_data['volume_name']} - {self.meta['novel_name']}.epub"
-            ),
+        # Determine Output Path
+        filename = TextUtils.format_filename(
+            f"{vol_data['volume_name']} - {self.meta['novel_name']}.epub"
         )
-        epub.write_epub(out, book, {})
-        print(f"Created: {out}")
+        out_path = self._get_output_path(filename, is_merged=False)
+
+        epub.write_epub(out_path, book, {})
+        print(f"Created: {out_path}")
 
 
 # --- Parser ---
@@ -939,17 +953,17 @@ class Application:
             ln = self.parser.parse(url)
             if not ln:
                 return
-            save_dir = join("saved_data", TextUtils.format_filename(ln.name))
+            # Changed 'saved_data' to 'data'
+            save_dir = join(DATA_DIR, TextUtils.format_filename(ln.name))
         else:
-            if not exists("saved_data"):
+            if not exists(DATA_DIR):
+                print(f"No {DATA_DIR} directory found.")
                 return
-            folders = [
-                f for f in os.listdir("saved_data") if isdir(join("saved_data", f))
-            ]
+            folders = [f for f in os.listdir(DATA_DIR) if isdir(join(DATA_DIR, f))]
             if not folders:
                 return
             fname = questionary.select("Select Folder:", choices=folders).ask()
-            save_dir = join("saved_data", fname)
+            save_dir = join(DATA_DIR, fname)
 
         if action in ["Download (Create JSONs)", "Full Process"]:
             dl = NovelDownloader(ln, save_dir)
@@ -970,7 +984,6 @@ class Application:
                 dl.download_volume(v)
 
         if action in ["Build EPUB (From JSONs)", "Full Process"]:
-            # Ask for Image Quality preference
             compress_choice = questionary.select(
                 "Image Quality for EPUB:",
                 choices=[
