@@ -30,7 +30,14 @@ logger = logging.getLogger(__name__)
 
 # Constants
 DOMAINS = ["docln.net", "ln.hako.vn", "docln.sbs"]
-IMAGE_DOMAINS = ["i.hako.vip", "i.docln.net", "ln.hako.vn"]
+# Updated to include i2 domains so they are treated as internal (keeps Referer headers)
+IMAGE_DOMAINS = [
+    "i.hako.vip",
+    "i.docln.net",
+    "ln.hako.vn",
+    "i2.docln.net",
+    "i2.hako.vip",
+]
 
 THREAD_NUM = 1
 HEADERS = {
@@ -104,6 +111,10 @@ class NetworkManager:
 
     @staticmethod
     def check_available_request(url: str, stream: bool = False) -> requests.Response:
+        # Force swap old i2.docln.net domains to i2.hako.vip
+        if "i2.docln.net" in url:
+            url = url.replace("i2.docln.net", "i2.hako.vip")
+
         if not url.startswith("http"):
             url = "https://" + url if not url.startswith("//") else "https:" + url
 
@@ -627,7 +638,9 @@ class EpubBuilder:
         # --- Spine & TOC Construction ---
         # TS Logic: TOC (Nav) -> Intro -> Content
         spine = [intro_page]
-        toc = [intro_page]  # Nav logic in python maps TOC to NavMap
+        toc = [
+            epub.Link("intro.xhtml", "Giới thiệu", "intro")
+        ]  # Nav logic in python maps TOC to NavMap
 
         added_img = set()
         if main_cover_item:
@@ -899,7 +912,6 @@ class Application:
             dl.create_metadata_file()
 
             opts = [v.name for v in ln.volumes]
-            opts.insert(0, "All Volumes")
             sel = questionary.checkbox("Select Volumes:", choices=opts).ask()
             if not sel:
                 return
