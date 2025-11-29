@@ -9,18 +9,20 @@ import time
 import logging
 import os
 import shutil
+import io
+import html
 from multiprocessing.dummy import Pool as ThreadPool
-from os.path import isdir, isfile, join, exists
+from os.path import isdir, isfile, join, exists, splitext
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
-import html
 
 import questionary
 import requests
 import tqdm
 from bs4 import BeautifulSoup
 from ebooklib import epub
+from PIL import Image
 
 # Configure logging
 logging.basicConfig(
@@ -30,7 +32,6 @@ logger = logging.getLogger(__name__)
 
 # Constants
 DOMAINS = ["docln.net", "ln.hako.vn", "docln.sbs"]
-# Updated to include i2 domains so they are treated as internal (keeps Referer headers)
 IMAGE_DOMAINS = [
     "i.hako.vip",
     "i.docln.net",
@@ -72,6 +73,7 @@ class LightNovel:
     author: str = "Unknown"
     summary: str = ""
     main_cover: str = ""
+    tags: List[str] = field(default_factory=list)
     volumes: List[Volume] = field(default_factory=list)
 
 
@@ -102,6 +104,8 @@ class TextUtils:
 
 
 class NetworkManager:
+    REQUEST_COUNT = 0
+
     @staticmethod
     def is_internal_domain(url: str) -> bool:
         parsed = urlparse(url)
@@ -111,7 +115,11 @@ class NetworkManager:
 
     @staticmethod
     def check_available_request(url: str, stream: bool = False) -> requests.Response:
-        # Force swap old i2.docln.net domains to i2.hako.vip
+        NetworkManager.REQUEST_COUNT += 1
+        if NetworkManager.REQUEST_COUNT > 0 and NetworkManager.REQUEST_COUNT % 100 == 0:
+            logger.info("Anti-Ban: Pausing for 60 seconds...")
+            time.sleep(60)
+
         if "i2.docln.net" in url:
             url = url.replace("i2.docln.net", "i2.hako.vip")
 
@@ -129,7 +137,6 @@ class NetworkManager:
             or "/img/" in path
         )
 
-        # If it's an external link AND not an image, handle it separately and exit.
         if not NetworkManager.is_internal_domain(url) and not is_image:
             headers = HEADERS.copy()
             if "Referer" in headers:
@@ -149,16 +156,12 @@ class NetworkManager:
                     time.sleep(1)
             raise requests.RequestException(f"Failed external link: {url}")
 
-        # If we reach here, it's either an internal link OR an image (internal or external).
-        # Both should use the fallback logic.
         domains_to_try = IMAGE_DOMAINS[:] if is_image else DOMAINS[:]
-
         original = parsed.netloc
-        # For images from external domains, 'original' won't be in 'domains_to_try'.
-        # We should add it to the list of domains to try, at the front.
+
         if original not in domains_to_try:
             domains_to_try.insert(0, original)
-        else:  # It's already an internal domain, just move it to the front.
+        else:
             domains_to_try.remove(original)
             domains_to_try.insert(0, original)
 
@@ -194,6 +197,7 @@ class NetworkManager:
     def download_image_to_disk(url: str, save_path: str) -> bool:
         if not url:
             return False
+
         if exists(save_path):
             if os.path.getsize(save_path) > 0:
                 return True
@@ -202,13 +206,14 @@ class NetworkManager:
 
         if "imgur.com" in url and "." not in url[-5:]:
             url += ".jpg"
+
         try:
             resp = NetworkManager.check_available_request(url, stream=True)
             with open(save_path, "wb") as f:
                 shutil.copyfileobj(resp.raw, f)
             return True
         except Exception as e:
-            logger.warning(f"Image DL fail: {url}")
+            logger.warning(f"Image DL fail: {url} | {e}")
             return False
 
 
@@ -232,6 +237,9 @@ class NovelDownloader:
             ext = "jpg"
             if "png" in self.ln.main_cover:
                 ext = "png"
+            elif "gif" in self.ln.main_cover:
+                ext = "gif"
+
             fname = f"main_cover.{ext}"
             save_path = join(self.images_folder, fname)
             if NetworkManager.download_image_to_disk(self.ln.main_cover, save_path):
@@ -251,6 +259,7 @@ class NovelDownloader:
         metadata = {
             "novel_name": self.ln.name,
             "author": self.ln.author,
+            "tags": self.ln.tags,
             "summary": self.ln.summary,
             "cover_image_local": local_cover_path,
             "url": self.ln.url,
@@ -289,6 +298,8 @@ class NovelDownloader:
                     ext = "png"
                 elif "gif" in src:
                     ext = "gif"
+                elif "webp" in src:
+                    ext = "webp"
 
                 local_name = f"{img_prefix}_chap_{idx}_img_{i}.{ext}"
 
@@ -307,7 +318,7 @@ class NovelDownloader:
                 if not el.get_text(strip=True) and not el.find("img"):
                     el.decompose()
 
-            # *** Smart Footnote Processing (Hybrid Approach) ***
+            # Footnotes
             note_map = {}
             note_divs = list(soup.find_all("div", id=re.compile(r"^note\d+")))
 
@@ -452,6 +463,11 @@ class NovelDownloader:
         vol_cover_local = ""
         if volume.cover_img:
             ext = "jpg"
+            if "png" in volume.cover_img:
+                ext = "png"
+            elif "gif" in volume.cover_img:
+                ext = "gif"
+
             fname = f"vol_cover_{TextUtils.format_filename(volume.name)}.{ext}"
             if NetworkManager.download_image_to_disk(
                 volume.cover_img, join(self.images_folder, fname)
@@ -474,8 +490,11 @@ class NovelDownloader:
 
 
 class EpubBuilder:
-    def __init__(self, base_folder: str):
+    def __init__(self, base_folder: str, compress_images: bool = True):
         self.base_folder = base_folder
+        self.compress_images = compress_images  # Toggle for compression
+        self.image_map = {}
+
         self.meta = {}
         meta_path = join(base_folder, "metadata.json")
         if exists(meta_path):
@@ -487,126 +506,156 @@ class EpubBuilder:
                 "author": "Unknown",
                 "summary": "",
                 "cover_image_local": "",
+                "tags": [],
             }
 
-        # CSS from TypeScript
         self.css = """
             body { margin: 0; padding: 5px; text-align: justify; line-height: 1.4em; font-family: serif; }
             h1, h2, h3 { text-align: center; margin: 1em 0; font-weight: bold; }
             img { display: block; margin: 10px auto; max-width: 100%; height: auto; }
             p { margin-bottom: 1em; text-indent: 1em; }
             .center { text-align: center; }
-            
             nav#toc ol { list-style-type: none; padding-left: 0; }
             nav#toc > ol > li { margin-top: 1em; font-weight: bold; }
             nav#toc > ol > li > ol { list-style-type: none; padding-left: 1.5em; font-weight: normal; }
             nav#toc > ol > li > ol > li { margin-top: 0.5em; }
             nav#toc a { text-decoration: none; color: inherit; }
             nav#toc a:hover { text-decoration: underline; color: blue; }
-
-            /* Footnote styles */
-            a.footnote-link {
-                vertical-align: super;
-                font-size: 0.75em;
-                text-decoration: none;
-                color: #007bff;
-                margin-left: 2px;
-            }
-            
-            /* Hybrid Footnotes: Visible block for Calibre, Semantic for Apple Books */
-            aside.footnote-content { 
-                margin-top: 1em;
-                padding: 0.5em;
-                border-top: 1px solid #ccc;
-                font-size: 0.9em;
-                color: #333;
-                background-color: #f9f9f9;
-                display: block; 
-            }
-            
-            aside.footnote-content p {
-                margin: 0;
-                text-indent: 0;
-            }
-
-            aside.footnote-content div.note-header {
-                font-weight: bold; 
-                margin-bottom: 0.5em; 
-                color: #555;
-            }
+            a.footnote-link { vertical-align: super; font-size: 0.75em; text-decoration: none; color: #007bff; margin-left: 2px; }
+            aside.footnote-content { margin-top: 1em; padding: 0.5em; border-top: 1px solid #ccc; font-size: 0.9em; color: #333; background-color: #f9f9f9; display: block; }
+            aside.footnote-content p { margin: 0; text-indent: 0; }
+            aside.footnote-content div.note-header { font-weight: bold; margin-bottom: 0.5em; color: #555; }
         """
 
     def sanitize_xhtml(self, html_content: str) -> str:
-        """
-        Replicates sanitizeXhtml from Typescript:
-        1. Replace &nbsp; with &#160;
-        2. Remove empty paragraphs
-        3. Remove consecutive <br>
-        """
         if not html_content:
             return ""
-
         safe = html_content
         safe = safe.replace("&nbsp;", "&#160;")
-
-        # Remove empty paragraphs: Matches <p> tags containing only whitespace, &nbsp;, or <br>
-        # Python re does not support all flags same as JS, so we use case insensitive
         pattern_empty_p = re.compile(
             r"<p[^>]*>(\s|&nbsp;|&#160;|<br\s*\/?>)*<\/p>", re.IGNORECASE
         )
         safe = pattern_empty_p.sub("", safe)
-
-        # Remove multiple consecutive <br>
         pattern_br = re.compile(r"(<br\s*\/?>\s*){3,}", re.IGNORECASE)
         safe = pattern_br.sub("<br/><br/>", safe)
-
         return safe.strip()
 
-    def _get_img(self, path: str):
-        full_path = join(self.base_folder, path)
-        if exists(full_path):
-            with open(full_path, "rb") as f:
-                return epub.EpubItem(
-                    file_name=path.replace("\\", "/"),
-                    media_type="image/jpeg",
-                    content=f.read(),
+    def process_image(self, rel_path: str) -> Tuple[Optional[epub.EpubItem], str]:
+        """
+        Processes image.
+        If corrupt/truncated: Deletes file from disk and returns None.
+        If valid: Returns EpubItem.
+        """
+        if not rel_path:
+            return None, ""
+
+        if rel_path in self.image_map:
+            return None, self.image_map[rel_path]
+
+        full_path = join(self.base_folder, rel_path)
+        if not exists(full_path):
+            return None, rel_path
+
+        try:
+            # --- VALIDATION STEP (Crucial for detecting truncation) ---
+            # We open the image to check if it's broken, even if we don't compress it.
+            # verify() catches some errors, load() catches truncation.
+            with Image.open(full_path) as valid_check:
+                valid_check.load()
+            # --------------------------------------------------------
+
+            # Case 1: No Compression - Read raw file
+            if not self.compress_images:
+                with open(full_path, "rb") as f:
+                    content = f.read()
+
+                ext = splitext(rel_path)[1].lower()
+                media_type = "image/jpeg"
+                if ext == ".png":
+                    media_type = "image/png"
+                elif ext == ".gif":
+                    media_type = "image/gif"
+                elif ext == ".webp":
+                    media_type = "image/webp"
+
+                item = epub.EpubItem(
+                    uid=rel_path.replace("/", "_").replace(".", "_"),
+                    file_name=rel_path,
+                    media_type=media_type,
+                    content=content,
                 )
-        return None
+                self.image_map[rel_path] = rel_path
+                return item, rel_path
+
+            # Case 2: Compress - Convert to JPEG 75
+            img = Image.open(full_path)
+            if img.mode in ("RGBA", "P"):
+                img = img.convert("RGB")
+
+            output = io.BytesIO()
+            img.save(output, format="JPEG", quality=75, optimize=True)
+
+            base, _ = splitext(rel_path)
+            new_rel_path = f"{base}.jpg"
+
+            item = epub.EpubItem(
+                uid=new_rel_path.replace("/", "_").replace(".", "_"),
+                file_name=new_rel_path,
+                media_type="image/jpeg",
+                content=output.getvalue(),
+            )
+
+            self.image_map[rel_path] = new_rel_path
+            return item, new_rel_path
+
+        except Exception as e:
+            # --- NEW AUTO-DELETE LOGIC ---
+            error_msg = str(e).lower()
+            if "truncated" in error_msg or "cannot identify" in error_msg:
+                logger.error(f"CORRUPT FILE FOUND: {rel_path}")
+                logger.warning(f"-> Deleting {rel_path}...")
+                try:
+                    os.remove(full_path)
+                    logger.warning(
+                        "-> File deleted. Please run 'Download' action again to re-fetch it."
+                    )
+                except OSError:
+                    logger.error("-> Could not delete file (locked?). Delete manually.")
+                return None, ""  # Skip adding this broken image to EPUB
+            # -----------------------------
+
+            logger.error(f"Image process failed for {rel_path}: {e}")
+            return None, rel_path
 
     def make_intro(self, vol_name: str = ""):
-        # Match TS Intro Format exactly
-        # 1. Title, 2. "Toàn tập" (if full), 3. Author, 4. Main Cover (Page Break), 5. Summary
-
         summary_html = self.sanitize_xhtml(self.meta.get("summary", ""))
         title = html.escape(self.meta["novel_name"])
         author = html.escape(self.meta["author"])
+        tags_str = ", ".join(self.meta.get("tags", []))
+        tags_html = f"<p><b>Thể loại:</b> {tags_str}</p>" if tags_str else ""
 
-        # Logic for Cover Embedding
         cover_html = "<hr/>"
         main_cover_path = self.meta.get("cover_image_local")
 
-        # We need to return the image item so it can be added to the book
         cover_item = None
         if main_cover_path:
-            cover_item = self._get_img(main_cover_path)
-            if cover_item:
-                # TS uses page-break-after: always for cover div
-                cover_html = f'<div style="text-align:center; margin: 2em 0; page-break-after: always; break-after: page;"><img src="{main_cover_path}" alt="Cover"/></div>'
+            item, new_path = self.process_image(main_cover_path)
+            cover_item = item
+            if new_path:  # Ensure we use the possibly mapped path
+                cover_html = f'<div style="text-align:center; margin: 2em 0; page-break-after: always; break-after: page;"><img src="{new_path}" alt="Cover"/></div>'
 
         content = f"""
             <div style="text-align: center; margin-top: 5%;">
                 <h1>{title}</h1>
                 <h3 style="margin-bottom: 0.5em;">{vol_name}</h3>
                 <p><b>Tác giả:</b> {author}</p>
-                
+                {tags_html}
                 {cover_html}
-                
                 <div style="text-align: justify;">
                     {summary_html}
                 </div>
             </div>
         """
-
         page = epub.EpubHtml(
             title="Giới thiệu", file_name="intro.xhtml", content=content
         )
@@ -625,52 +674,42 @@ class EpubBuilder:
 
         if self.meta.get("summary"):
             book.add_metadata("DC", "description", self.meta["summary"])
+        for tag in self.meta.get("tags", []):
+            book.add_metadata("DC", "subject", tag)
 
         css = epub.EpubItem(
             uid="style", file_name="style.css", media_type="text/css", content=self.css
         )
         book.add_item(css)
 
-        # --- intro.xhtml & Main Cover ---
         intro_page, main_cover_item = self.make_intro("Toàn tập")
         intro_page.add_item(css)
 
         if main_cover_item:
             book.add_item(main_cover_item)
-            # Set cover metadata (OPF) but do NOT create the default cover page
-            # We use intro.xhtml as the visual start
+            # Default to generic cover.jpg, or use mapped extension?
+            # EpubBook.set_cover content argument just needs bytes.
             book.set_cover("cover.jpg", main_cover_item.content, create_page=False)
 
         book.add_item(intro_page)
-
-        # --- Spine & TOC Construction ---
-        # TS Logic: TOC (Nav) -> Intro -> Content
         spine = [intro_page]
-        toc = [
-            epub.Link("intro.xhtml", "Giới thiệu", "intro")
-        ]  # Nav logic in python maps TOC to NavMap
-
-        added_img = set()
-        if main_cover_item:
-            added_img.add(self.meta["cover_image_local"])
+        toc = [epub.Link("intro.xhtml", "Giới thiệu", "intro")]
 
         for i, jf in enumerate(json_files):
             print(f"Merging: {jf}")
             with open(join(self.base_folder, jf), "r", encoding="utf-8") as f:
                 vol_data = json.load(f)
 
-            # --- Volume Separator (vol_X.xhtml) ---
-            # TS: Centered, Top 30vh, Cover (if exists), H1 Name
             vol_html_content = ""
             vol_cover = vol_data.get("cover_image_local")
 
             if vol_cover:
-                if vol_cover not in added_img:
-                    itm = self._get_img(vol_cover)
-                    if itm:
-                        book.add_item(itm)
-                        added_img.add(vol_cover)
-                vol_html_content += f'<img src="{vol_cover}" alt="Vol Cover" style="max-height: 50vh;"/>'
+                item, new_src = self.process_image(vol_cover)
+                if item:
+                    book.add_item(item)
+                vol_html_content += (
+                    f'<img src="{new_src}" alt="Vol Cover" style="max-height: 50vh;"/>'
+                )
 
             vol_html_content += f"<h1>{html.escape(vol_data['volume_name'])}</h1>"
 
@@ -682,29 +721,25 @@ class EpubBuilder:
 
             sep_page = epub.EpubHtml(
                 title=vol_data["volume_name"],
-                file_name=f"vol_{i}.xhtml",  # TS uses index based naming
+                file_name=f"vol_{i}.xhtml",
                 content=sep_html,
             )
             sep_page.add_item(css)
             book.add_item(sep_page)
             spine.append(sep_page)
 
-            # --- Chapters ---
             vol_chaps = []
             for chap in vol_data["chapters"]:
-                # Process images in chapter content
                 soup = BeautifulSoup(chap["content"], HTML_PARSER)
                 for img in soup.find_all("img"):
                     src = img.get("src")
-                    if src and src not in added_img:
-                        itm = self._get_img(src)
-                        if itm:
-                            book.add_item(itm)
-                            added_img.add(src)
+                    if src:
+                        item, new_src = self.process_image(src)
+                        if item:
+                            book.add_item(item)
+                        img["src"] = new_src
 
-                # Sanitize content using TS logic
                 clean_content = self.sanitize_xhtml(str(soup))
-
                 fname = f"v{i}_c{chap['index']}.xhtml"
                 c_page = epub.EpubHtml(
                     title=chap["title"],
@@ -718,15 +753,10 @@ class EpubBuilder:
             spine.extend(vol_chaps)
             toc.append((sep_page, vol_chaps))
 
-        # --- Final Assembly ---
-        # eBookLib's EpubNav creates nav.xhtml
         nav = epub.EpubNav()
         book.add_item(nav)
-
-        # TS Spine Order: Nav -> Intro -> Vol/Chaps
         book.spine = ["nav"] + spine
         book.toc = toc
-
         book.add_item(epub.EpubNcx())
 
         out = join(
@@ -737,7 +767,6 @@ class EpubBuilder:
         print(f"Created Merged EPUB: {out}")
 
     def build_volume(self, json_file: str):
-        # Adapting single volume build to use same logic
         with open(join(self.base_folder, json_file), "r", encoding="utf-8") as f:
             vol_data = json.load(f)
 
@@ -745,6 +774,8 @@ class EpubBuilder:
         book.set_title(f"{vol_data['volume_name']} - {self.meta['novel_name']}")
         book.set_language("vi")
         book.add_author(self.meta["author"])
+        for tag in self.meta.get("tags", []):
+            book.add_metadata("DC", "subject", tag)
 
         css = epub.EpubItem(
             uid="style", file_name="style.css", media_type="text/css", content=self.css
@@ -759,19 +790,16 @@ class EpubBuilder:
         book.add_item(intro_page)
 
         spine = [intro_page]
-        added_img = set()
-        if main_cover_item:
-            added_img.add(self.meta["cover_image_local"])
 
         for chap in vol_data["chapters"]:
             soup = BeautifulSoup(chap["content"], HTML_PARSER)
             for img in soup.find_all("img"):
                 src = img.get("src")
-                if src and src not in added_img:
-                    itm = self._get_img(src)
-                    if itm:
-                        book.add_item(itm)
-                        added_img.add(src)
+                if src:
+                    item, new_src = self.process_image(src)
+                    if item:
+                        book.add_item(item)
+                    img["src"] = new_src
 
             clean = self.sanitize_xhtml(str(soup))
             c_page = epub.EpubHtml(
@@ -821,6 +849,14 @@ class LightNovelInfoParser:
                     if match:
                         ln.main_cover = match.group(1)
 
+            # Get Tags
+            genre_div = soup.find(
+                "div", class_=re.compile(r"series-gernes|series-genres")
+            )
+            if genre_div:
+                for a in genre_div.find_all("a"):
+                    ln.tags.append(a.text.strip())
+
             info_div = soup.find("div", "series-information")
             if info_div:
                 for item in info_div.find_all("div", "info-item"):
@@ -866,7 +902,7 @@ class LightNovelInfoParser:
                             vol.chapters.append(Chapter(name=a.text.strip(), url=c_url))
                 ln.volumes.append(vol)
 
-            print(f"Parsed: {ln.name} | Cover found: {bool(ln.main_cover)}")
+            print(f"Parsed: {ln.name} | Tags: {len(ln.tags)}")
             return ln
         except Exception as e:
             logger.error(f"Parse Error: {e}")
@@ -934,7 +970,18 @@ class Application:
                 dl.download_volume(v)
 
         if action in ["Build EPUB (From JSONs)", "Full Process"]:
-            builder = EpubBuilder(save_dir)
+            # Ask for Image Quality preference
+            compress_choice = questionary.select(
+                "Image Quality for EPUB:",
+                choices=[
+                    "Optimized (Small File Size - JPEG 75)",
+                    "Original (Max Quality - Keep PNG/GIF)",
+                ],
+            ).ask()
+
+            do_compress = "Optimized" in compress_choice
+
+            builder = EpubBuilder(save_dir, compress_images=do_compress)
             jsons = [
                 f
                 for f in os.listdir(save_dir)
