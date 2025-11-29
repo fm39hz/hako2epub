@@ -1,0 +1,5 @@
+questionary
+requests
+tqdm
+beautifulsoup4
+ebooklib

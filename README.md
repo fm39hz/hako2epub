@@ -1,160 +1,38 @@
-<!-- PROJECT LOGO -->
-<br />
-<p align="center">
-    <img src="images/logo.png" alt="Logo" width="80" height="80"></img>
+# hako2epub
 
-  <h2 align="center">hako2epub</h2>
+A Python-based tool to download light novels from Hako (docln.net, ln.hako.vn) and convert them into EPUB format for offline reading.
 
-  <p align="center">
-    A tool to download light novels from <a href=https://ln.hako.vn/>ln.hako.vn</a> in epub file format for offline reading.
-    <br />
-    <br />
-    <a href="https://github.com/quantrancse/hako2epub/releases/download/latest/hako2epub.exe">Download</a>
-    ·
-    <a href="#screenshots">Screenshots</a>
-    ·
-    <a href="#usage">Script Usage</a>
-  </p>
-</p>
+## Features
 
-## Notes
-It's recommended to use [**1.1.1.1 Cloudflare WARP**](https://one.one.one.one/) when downloading novels for better performance and reliability.
+- **Interactive Downloader**: Guides you through selecting a novel and choosing which volumes to download.
+- **EPUB Generation**: Converts the downloaded content into well-formatted EPUB files.
+- **Flexible Build Options**:
+  - **Merged EPUB**: Combine all selected volumes into a single, comprehensive EPUB file.
+  - **Separate EPUBs**: Create an individual EPUB file for each volume.
+- **Smart Caching**: Saves downloaded chapter data locally. It intelligently re-downloads only if the cached data is missing or incomplete, saving time and bandwidth.
+- **Image and Footnote Handling**: Downloads and embeds images within the chapters and correctly processes footnotes for a clean reading experience.
+- **Resilient Networking**: Automatically retries downloads and cycles through available domains to handle network errors and site changes gracefully.
 
-<!-- TABLE OF CONTENTS -->
-## Table of Contents
+## Usage
 
-- [Table of Contents](#table-of-contents)
-- [About The Project](#about-the-project)
-  - [Features](#features)
-- [Getting Started](#getting-started)
-  - [Prerequisites](#prerequisites)
-  - [Usage](#usage)
-  - [Notes](#notes)
-- [Screenshots](#screenshots)
-- [Issues](#issues)
-- [Contributing](#contributing)
-- [License](#license)
-- [Contact](#contact)
-- [Acknowledgements](#acknowledgements)
+1. **Install dependencies:**
 
-<!-- ABOUT THE PROJECT -->
-## About The Project
+    ```bash
+    pip install -r requirements.txt
+    ```
 
-A tool to download light novels from [ln.hako.vn](https://ln.hako.vn) in epub file format for offline reading.
+2. **Run the script:**
 
-**_Notes:_**
-* _This tool is a personal standalone project, it does not have any related to [ln.hako.vn](https://ln.hako.vn) administrators._
-* _If possible, please support the original light novel, hako website, and light novel translation authors._
-* _This tool is for non-commercial purpose only._
+    ```bash
+    python hako2epub.py
+    ```
 
-### Features
-* Working with [docln.net](https://docln.net/) and [docln.sbs](https://docln.sbs/).
-* Auto check and switch to working URL.
-* Support all kind of novels (Truyện dịch, Sáng tác, AI Dịch).
-* Support images.
-* Support navigation and table of contents.
-* Notes are shown directly in the light novel content.
-* Download all/single volume of a light novel.
-* Download specific chapters of a light novel.
-* Update all/single downloaded light novel.
-  * Update new volumes.
-  * Update new chapters.
-* Support multiprocessing to speed up.
-* Auto get current downloaded light novel in the directory.
-* Auto checking the new tool version.
+    Or provide a URL directly:
 
-<!-- GETTING STARTED -->
-## Getting Started
+    ```bash
+    python hako2epub.py "https://docln.net/truyen/some-novel"
+    ```
 
-For normal user, download the execution file below. Run and follow the instructions.
+3. **Follow the on-screen prompts** to select an action (Download, Build, or Full Process) and choose the desired volumes.
 
-**Windows**: [hako2epub.exe](https://github.com/quantrancse/hako2epub/releases/download/latest/hako2epub.exe)
-
-### Prerequisites
-
-* python >= 3.9
-* ebooklib
-* requests
-* bs4
-* pillow
-* tqdm
-* questionary
-* argparse
-```sh
-pip install ebooklib requests bs4 pillow argparse tqdm questionary
-```
-
-### Usage
-```text
-usage: hako2epub.py [-h] [-v] [-c ln_url] [-u [ln_url]] [ln_url]
-
-A tool to download light novels from https://ln.hako.vn in epub file format for offline reading.
-
-positional arguments:
-  ln_url                url to the light novel page
-
-options:
-  -h, --help            show this help message and exit
-  -v, --version         show program's version number and exit
-  -c, --chapter ln_url  download specific chapters of a light novel
-  -u, --update [ln_url] update all/single light novel
-```
-* Download a light novel
-```sh
-python hako2epub.py light_novel_url
-```
-* Download specific chapters of light novel
-```sh
-python hako2epub.py -c light_novel_url
-```
-* Update all downloaded light novels
-```sh
-python hako2epub.py -u
-```
-* Update a single downloaded light novel
-```sh
-python hako2epub.py -u light_novel_url
-```
-### Notes
-* After processing 190 requests at a time, the program will pause for 120 seconds (2 mins) to avoid spam blocking. Please be patient if it hangs.
-* Light novel will be downloaded into the 'downloaded' directory.
-* Downloaded information will be saved into `ln_info.json` file located in the 'downloaded' directory.
-* If you download specific chapters of a light novel, please enter the full name of the chapter in the "from ... to ..." prompt.
-* If you update the volume which contains specific chapters, only new chapters after the current latest chapter will be added.
-* The program automatically manages the `ln_info.json` file alongside your downloaded light novels in the 'downloaded' directory for efficient management.
-
-## Screenshots
-![Demo](images/demo.png)
-
-<!-- ISSUES -->
-## Issues
-
-* I only tested on some of my favorite light novels.
-* Sometimes the tool can not get images from some image hosts.
-* Sometimes you have to wait (most cases are under 10 seconds) to download or update the light novels (maybe only the first light novel in the list). If you are over that time, you should use a VPN (1.1.1.1 Cloudflare WARP) to avoid this.
-* If you update the light novel that was renamed, it will download the whole light novel again. To avoid this, please manually rename the path of the epub file to the new light novel name exactly like the current name format. Also rename the light novel in the `downloaded/ln_info.json` file.
-
-<!-- CONTRIBUTING -->
-## Contributing
-
-Contributions are what make the open source community such an amazing place to be learn, inspire, and create. Any contributions you make are **greatly appreciated**.
-
-1. Fork the Project
-2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the Branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
-<!-- LICENSE -->
-## License
-
-Distributed under the MIT License. See [LICENSE][license-url] for more information.
-
-<!-- CONTACT -->
-## Contact
-
-* **Author** - [@quantrancse](https://quantrancse.github.io)
-
-<!-- ACKNOWLEDGEMENTS -->
-## Acknowledgements
-* [EbookLib](https://github.com/aerkalov/ebooklib)
+The script will create a `saved_data` directory to store the downloaded content and a `downloaded` directory for the final EPUB files.
