@@ -118,7 +118,19 @@ class NetworkManager:
         if not url.startswith("http"):
             url = "https://" + url if not url.startswith("//") else "https:" + url
 
-        if not NetworkManager.is_internal_domain(url):
+        parsed = urlparse(url)
+        path = parsed.path
+        if parsed.query:
+            path += "?" + parsed.query
+
+        is_image = (
+            "/covers/" in path
+            or path.endswith((".jpg", ".png", ".gif", ".jpeg"))
+            or "/img/" in path
+        )
+
+        # If it's an external link AND not an image, handle it separately and exit.
+        if not NetworkManager.is_internal_domain(url) and not is_image:
             headers = HEADERS.copy()
             if "Referer" in headers:
                 del headers["Referer"]
@@ -137,20 +149,16 @@ class NetworkManager:
                     time.sleep(1)
             raise requests.RequestException(f"Failed external link: {url}")
 
-        parsed = urlparse(url)
-        path = parsed.path
-        if parsed.query:
-            path += "?" + parsed.query
-
-        is_image = (
-            "/covers/" in path
-            or path.endswith((".jpg", ".png", ".gif", ".jpeg"))
-            or "/img/" in path
-        )
+        # If we reach here, it's either an internal link OR an image (internal or external).
+        # Both should use the fallback logic.
         domains_to_try = IMAGE_DOMAINS[:] if is_image else DOMAINS[:]
 
         original = parsed.netloc
-        if original in domains_to_try:
+        # For images from external domains, 'original' won't be in 'domains_to_try'.
+        # We should add it to the list of domains to try, at the front.
+        if original not in domains_to_try:
+            domains_to_try.insert(0, original)
+        else:  # It's already an internal domain, just move it to the front.
             domains_to_try.remove(original)
             domains_to_try.insert(0, original)
 
