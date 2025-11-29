@@ -12,7 +12,7 @@ import shutil
 import io
 import html
 from multiprocessing.dummy import Pool as ThreadPool
-from os.path import isdir, isfile, join, exists, splitext
+from os.path import isdir, join, exists, splitext
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
@@ -496,7 +496,7 @@ class EpubBuilder:
         self.base_folder = base_folder
         self.compress_images = compress_images
         self.image_map = {}
-        self.result_root = RESULT_DIR  # "result"
+        self.result_root = RESULT_DIR
 
         self.meta = {}
         meta_path = join(base_folder, "metadata.json")
@@ -539,7 +539,7 @@ class EpubBuilder:
         """
         book_name_slug = TextUtils.format_filename(self.meta["novel_name"])
 
-        # Case 1: Merged & Original
+        # Case 1: Merged & Original (Special Case)
         if is_merged and not self.compress_images:
             if not exists(self.result_root):
                 os.makedirs(self.result_root)
@@ -681,7 +681,6 @@ class EpubBuilder:
         if "volumes" in self.meta:
             order_map = {v["filename"]: v["order"] for v in self.meta["volumes"]}
             json_files.sort(key=lambda x: order_map.get(x, 9999))
-            print("Files auto-sorted based on metadata order.")
 
         book = epub.EpubBook()
         book.set_title(f"{self.meta['novel_name']}")
@@ -773,7 +772,6 @@ class EpubBuilder:
         book.toc = toc
         book.add_item(epub.EpubNcx())
 
-        # Determine Output Path
         filename = TextUtils.format_filename(f"{self.meta['novel_name']} Full.epub")
         out_path = self._get_output_path(filename, is_merged=True)
 
@@ -830,7 +828,6 @@ class EpubBuilder:
         book.spine = ["nav"] + spine
         book.add_item(epub.EpubNcx())
 
-        # Determine Output Path
         filename = TextUtils.format_filename(
             f"{vol_data['volume_name']} - {self.meta['novel_name']}.epub"
         )
@@ -938,8 +935,62 @@ class Application:
                 "Download (Create JSONs)",
                 "Build EPUB (From JSONs)",
                 "Full Process",
+                "Batch Build (All Books, All Options)",
             ],
         ).ask()
+
+        # --- BATCH PROCESSING ---
+        if action == "Batch Build (All Books, All Options)":
+            if not exists(DATA_DIR):
+                print(f"No {DATA_DIR} directory found.")
+                return
+
+            books = [f for f in os.listdir(DATA_DIR) if isdir(join(DATA_DIR, f))]
+            if not books:
+                print("No books found in data directory.")
+                return
+
+            print(f"Found {len(books)} books. Starting batch process...")
+
+            for book_folder in books:
+                book_path = join(DATA_DIR, book_folder)
+                jsons = [
+                    f
+                    for f in os.listdir(book_path)
+                    if f.endswith(".json") and f != "metadata.json"
+                ]
+
+                if not jsons:
+                    continue
+
+                print(f"\n>>> PROCESSING BOOK: {book_folder}")
+
+                # Loop through compression modes: [Optimized(True), Original(False)]
+                for compress_mode in [True, False]:
+                    mode_name = "Optimized" if compress_mode else "Original"
+                    print(f"   > Building Mode: {mode_name}")
+
+                    # Must re-init builder to clear image_map cache between modes
+                    builder = EpubBuilder(book_path, compress_images=compress_mode)
+
+                    # 1. Build Merged
+                    builder.build_merged(jsons)
+
+                    # 2. Build Separate
+                    # Sort separate volumes for cleaner logs (optional but nice)
+                    # We rely on metadata order if possible, else filename
+                    if "volumes" in builder.meta:
+                        order_map = {
+                            v["filename"]: v["order"] for v in builder.meta["volumes"]
+                        }
+                        jsons.sort(key=lambda x: order_map.get(x, 9999))
+
+                    for j in jsons:
+                        builder.build_volume(j)
+
+            print("\nBatch process finished!")
+            return
+        # ------------------------
 
         url = ""
         ln = None
@@ -953,7 +1004,6 @@ class Application:
             ln = self.parser.parse(url)
             if not ln:
                 return
-            # Changed 'saved_data' to 'data'
             save_dir = join(DATA_DIR, TextUtils.format_filename(ln.name))
         else:
             if not exists(DATA_DIR):
