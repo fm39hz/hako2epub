@@ -810,7 +810,8 @@ class EpubBuilder:
         book.toc = toc
         book.add_item(epub.EpubNcx())
 
-        filename = TextUtils.format_filename(f"{self.meta['novel_name']} Full.epub")
+        base_filename = TextUtils.format_filename(f"{self.meta['novel_name']} Full")
+        filename = f"{base_filename}.epub"
         out_path = self._get_output_path(filename, is_merged=True)
 
         epub.write_epub(out_path, book, {})
@@ -866,9 +867,10 @@ class EpubBuilder:
         book.spine = ["nav"] + spine
         book.add_item(epub.EpubNcx())
 
-        filename = TextUtils.format_filename(
-            f"{vol_data['volume_name']} - {self.meta['novel_name']}.epub"
+        base_filename = TextUtils.format_filename(
+            f"{vol_data['volume_name']} - {self.meta['novel_name']}"
         )
+        filename = f"{base_filename}.epub"
         out_path = self._get_output_path(filename, is_merged=False)
 
         epub.write_epub(out_path, book, {})
@@ -1019,9 +1021,10 @@ class Application:
                     builder = EpubBuilder(book_path, compress_images=compress_mode)
 
                     # 1. Build Merged
-                    merged_filename = TextUtils.format_filename(
-                        f"{builder.meta['novel_name']} Full.epub"
+                    base_merged_filename = TextUtils.format_filename(
+                        f"{builder.meta['novel_name']} Full"
                     )
+                    merged_filename = f"{base_merged_filename}.epub"
                     merged_out_path = builder._get_output_path(
                         merged_filename, is_merged=True, create_dirs=False
                     )
@@ -1048,9 +1051,10 @@ class Application:
                             ) as f:
                                 vol_data = json.load(f)
 
-                            sep_filename = TextUtils.format_filename(
-                                f"{vol_data['volume_name']} - {builder.meta['novel_name']}.epub"
+                            base_sep_filename = TextUtils.format_filename(
+                                f"{vol_data['volume_name']} - {builder.meta['novel_name']}"
                             )
+                            sep_filename = f"{base_sep_filename}.epub"
                             sep_out_path = builder._get_output_path(
                                 sep_filename, is_merged=False, create_dirs=False
                             )
