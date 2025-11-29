@@ -51,6 +51,41 @@ HTML_PARSER = "html.parser"
 
 session = requests.Session()
 
+BOOKS_FILE = "books.json"
+
+
+# --- Book List Management ---
+
+
+def read_books_list() -> List[str]:
+    """Reads the list of book folders from books.json."""
+    if not exists(BOOKS_FILE):
+        with open(BOOKS_FILE, "w", encoding="utf-8") as f:
+            json.dump({"books": []}, f)
+        return []
+    try:
+        with open(BOOKS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data.get("books", [])
+    except (json.JSONDecodeError, IOError):
+        return []
+
+
+def write_books_list(books: List[str]):
+    """Writes the list of book folders to books.json."""
+    with open(BOOKS_FILE, "w", encoding="utf-8") as f:
+        json.dump({"books": sorted(list(set(books)))}, f, ensure_ascii=False, indent=2)
+
+
+def add_book_to_list(book_folder: str):
+    """Adds a book folder to the books.json list if it's not already there."""
+    books = read_books_list()
+    if book_folder not in books:
+        books.append(book_folder)
+        write_books_list(books)
+        logger.info(f"Added '{book_folder}' to {BOOKS_FILE}")
+
+
 # --- Data Structures ---
 
 
@@ -270,6 +305,9 @@ class NovelDownloader:
 
         with open(join(self.base_folder, "metadata.json"), "w", encoding="utf-8") as f:
             json.dump(metadata, f, ensure_ascii=False, indent=2)
+
+        book_folder_name = os.path.basename(self.base_folder)
+        add_book_to_list(book_folder_name)
 
     def _process_chapter(self, data: Tuple[int, Chapter, str]) -> Dict:
         idx, chapter, img_prefix = data
@@ -530,7 +568,7 @@ class EpubBuilder:
             aside.footnote-content div.note-header { font-weight: bold; margin-bottom: 0.5em; color: #555; }
         """
 
-    def _get_output_path(self, filename: str, is_merged: bool) -> str:
+    def _get_output_path(self, filename: str, is_merged: bool, create_dirs: bool = True) -> str:
         """
         Determines the final output path based on user rules.
         1. Merged + Original -> result/<BookName - Full>.epub
@@ -541,7 +579,7 @@ class EpubBuilder:
 
         # Case 1: Merged & Original (Special Case)
         if is_merged and not self.compress_images:
-            if not exists(self.result_root):
+            if create_dirs and not exists(self.result_root):
                 os.makedirs(self.result_root)
             return join(self.result_root, filename)
 
@@ -551,7 +589,7 @@ class EpubBuilder:
         # Path: result/<BookName>/<subfolder>/
         target_dir = join(self.result_root, book_name_slug, subfolder)
 
-        if not exists(target_dir):
+        if create_dirs and not exists(target_dir):
             os.makedirs(target_dir)
 
         return join(target_dir, filename)
@@ -935,25 +973,29 @@ class Application:
                 "Download (Create JSONs)",
                 "Build EPUB (From JSONs)",
                 "Full Process",
-                "Batch Build (All Books, All Options)",
+                "Batch Build (from books.json)",
             ],
         ).ask()
 
         # --- BATCH PROCESSING ---
-        if action == "Batch Build (All Books, All Options)":
-            if not exists(DATA_DIR):
-                print(f"No {DATA_DIR} directory found.")
+        if action == "Batch Build (from books.json)":
+            books_in_list = read_books_list()
+            if not books_in_list:
+                print(f"'{BOOKS_FILE}' is empty. Nothing to build.")
                 return
 
-            books = [f for f in os.listdir(DATA_DIR) if isdir(join(DATA_DIR, f))]
-            if not books:
-                print("No books found in data directory.")
-                return
+            print(
+                f"Found {len(books_in_list)} books in '{BOOKS_FILE}'. Starting batch process..."
+            )
 
-            print(f"Found {len(books)} books. Starting batch process...")
-
-            for book_folder in books:
+            for book_folder in books_in_list:
                 book_path = join(DATA_DIR, book_folder)
+                if not isdir(book_path):
+                    logger.warning(
+                        f"Book folder '{book_folder}' not found in '{DATA_DIR}'. Skipping."
+                    )
+                    continue
+
                 jsons = [
                     f
                     for f in os.listdir(book_path)
@@ -961,6 +1003,9 @@ class Application:
                 ]
 
                 if not jsons:
+                    logger.warning(
+                        f"No volume jsons found for '{book_folder}'. Skipping."
+                    )
                     continue
 
                 print(f"\n>>> PROCESSING BOOK: {book_folder}")
@@ -974,7 +1019,18 @@ class Application:
                     builder = EpubBuilder(book_path, compress_images=compress_mode)
 
                     # 1. Build Merged
-                    builder.build_merged(jsons)
+                    merged_filename = TextUtils.format_filename(
+                        f"{builder.meta['novel_name']} Full.epub"
+                    )
+                    merged_out_path = builder._get_output_path(
+                        merged_filename, is_merged=True, create_dirs=False
+                    )
+
+                    if exists(merged_out_path):
+                        print("   - Merged EPUB already exists, skipping.")
+                    else:
+                        print("   - Building Merged EPUB...")
+                        builder.build_merged(jsons)
 
                     # 2. Build Separate
                     # Sort separate volumes for cleaner logs (optional but nice)
@@ -986,7 +1042,32 @@ class Application:
                         jsons.sort(key=lambda x: order_map.get(x, 9999))
 
                     for j in jsons:
-                        builder.build_volume(j)
+                        try:
+                            with open(
+                                join(book_path, j), "r", encoding="utf-8"
+                            ) as f:
+                                vol_data = json.load(f)
+
+                            sep_filename = TextUtils.format_filename(
+                                f"{vol_data['volume_name']} - {builder.meta['novel_name']}.epub"
+                            )
+                            sep_out_path = builder._get_output_path(
+                                sep_filename, is_merged=False, create_dirs=False
+                            )
+
+                            if exists(sep_out_path):
+                                print(
+                                    f"   - EPUB for '{vol_data['volume_name']}' already exists, skipping."
+                                )
+                            else:
+                                print(
+                                    f"   - Building EPUB for '{vol_data['volume_name']}'..."
+                                )
+                                builder.build_volume(j)
+                        except Exception as e:
+                            logger.error(
+                                f"Failed to process volume '{j}' for '{book_folder}': {e}"
+                            )
 
             print("\nBatch process finished!")
             return
